@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-width=1.0">
+    <title>Autonomous Sorter Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/eventemitter2@6.4.9/lib/eventemitter2.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/roslib@1/build/roslib.min.js"></script>
+    
+    <style>
+        :root { --bg: #0f172a; --panel: #1e293b; --accent: #38bdf8; --danger: #ef4444; --success: #22c55e; --text: #f8fafc; }
+        body { font-family: 'Segoe UI', system-ui, sans-serif; background-color: var(--bg); color: var(--text); margin: 0; padding: 20px; }
+        .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #334155; padding-bottom: 10px; margin-bottom: 20px; }
+        h1 { margin: 0; font-size: 1.8rem; letter-spacing: 1px; color: var(--accent); }
+        #status { padding: 8px 16px; border-radius: 20px; background: #334155; font-weight: bold; font-size: 0.9rem; }
+        .connected { color: var(--success); border: 1px solid var(--success); }
+        .disconnected { color: var(--danger); border: 1px solid var(--danger); }
+        
+        .dashboard-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; }
+        .card { background-color: var(--panel); padding: 20px; border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.3); border: 1px solid #334155; }
+        .card h2 { margin-top: 0; font-size: 1.1rem; text-transform: uppercase; letter-spacing: 1px; color: #94a3b8; border-bottom: 1px solid #334155; padding-bottom: 10px; }
+        
+        /* Telemetry & Color */
+        .data-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px; }
+        .data-box { background: #0f172a; padding: 10px; border-radius: 8px; text-align: center; border: 1px solid #334155; }
+        .data-label { font-size: 0.75rem; color: #64748b; text-transform: uppercase; margin-bottom: 5px; }
+        .data-val { font-size: 1.2rem; font-family: monospace; font-weight: bold; color: var(--accent); }
+        .color-display { display: flex; align-items: center; justify-content: space-between; background: #0f172a; padding: 10px; border-radius: 8px; border: 1px solid #334155; }
+        #color-swatch { width: 50px; height: 50px; border-radius: 50%; background: #000; border: 2px solid #fff; box-shadow: 0 0 10px rgba(0,0,0,0.5); }
+        
+        /* Controls */
+        .control-group { margin-bottom: 20px; }
+        .control-group label { display: flex; justify-content: space-between; font-size: 0.9rem; margin-bottom: 8px; }
+        input[type=range] { width: 100%; accent-color: var(--accent); cursor: pointer; }
+        
+        .btn-group { display: flex; gap: 10px; }
+        .btn { flex: 1; padding: 10px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; transition: 0.2s; background: #334155; color: white; }
+        .btn:hover { background: #475569; }
+        .btn:active { transform: scale(0.95); }
+        .btn-primary { background: var(--accent); color: #000; }
+        .btn-primary:hover { background: #0ea5e9; }
+        .btn-danger { background: var(--danger); }
+        .btn-danger:hover { background: #dc2626; }
+        
+        /* D-Pad */
+        .d-pad { display: grid; grid-template-columns: repeat(3, 60px); grid-template-rows: repeat(3, 60px); gap: 10px; justify-content: center; }
+        .d-btn { background: #334155; border: none; color: white; border-radius: 8px; font-size: 1.2rem; cursor: pointer; user-select: none; transition: 0.1s; }
+        .d-btn:active { background: var(--accent); color: #000; transform: scale(0.95); }
+        .d-up { grid-column: 2; grid-row: 1; }
+        .d-left { grid-column: 1; grid-row: 2; }
+        .d-stop { grid-column: 2; grid-row: 2; background: #475569; }
+        .d-right { grid-column: 3; grid-row: 2; }
+        .d-down { grid-column: 2; grid-row: 3; }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h1>Autonomous Sorter Dashboard</h1>
+        <div id="status" class="disconnected">Waiting for ROSBridge...</div>
+    </div>
+
+    <div class="dashboard-grid">
+        
+        <!-- TELEMETRY PANEL -->
+        <div class="card">
+            <h2>Sensor Telemetry</h2>
+            <div class="data-grid">
+                <div class="data-box"><div class="data-label">Encoder FL</div><div id="enc-fl" class="data-val">0</div></div>
+                <div class="data-box"><div class="data-label">Encoder FR</div><div id="enc-fr" class="data-val">0</div></div>
+                <div class="data-box"><div class="data-label">Encoder RL</div><div id="enc-rl" class="data-val">0</div></div>
+                <div class="data-box"><div class="data-label">Encoder RR</div><div id="enc-rr" class="data-val">0</div></div>
+            </div>
+            <div class="data-label" style="margin-top: 15px;">TCS34725 Color Detection (Live)</div>
+            <div class="color-display">
+                <div>
+                    <div>R: <span id="col-r" class="data-val">0</span></div>
+                    <div>G: <span id="col-g" class="data-val">0</span></div>
+                    <div>B: <span id="col-b" class="data-val">0</span></div>
+                </div>
+                <div id="color-swatch"></div>
+            </div>
+        </div>
+
+        <!-- DRIVE PANEL -->
+        <div class="card">
+            <h2>Chassis Control</h2>
+            <div class="control-group">
+                <label><span>Speed Limit</span><span id="speed-val">0.5</span></label>
+                <input type="range" min="0.1" max="1.0" step="0.1" value="0.5" onchange="updateMaxSpeed(this.value)">
+            </div>
+            <div class="d-pad">
+                <button class="d-btn d-up" onmousedown="drive(0.4, 0)" onmouseup="drive(0, 0)" ontouchstart="drive(0.4, 0)" ontouchend="drive(0, 0)">W</button>
+                <button class="d-btn d-left" onmousedown="drive(0, 1.0)" onmouseup="drive(0, 0)" ontouchstart="drive(0, 1.0)" ontouchend="drive(0, 0)">A</button>
+                <button class="d-btn d-stop" onclick="drive(0, 0)">STOP</button>
+                <button class="d-btn d-right" onmousedown="drive(0, -1.0)" onmouseup="drive(0, 0)" ontouchstart="drive(0, -1.0)" ontouchend="drive(0, 0)">D</button>
+                <button class="d-btn d-down" onmousedown="drive(-0.4, 0)" onmouseup="drive(0, 0)" ontouchstart="drive(-0.4, 0)" ontouchend="drive(0, 0)">S</button>
+            </div>
+        </div>
+
+        <!-- MANIPULATOR PANEL -->
+        <div class="card">
+            <h2>Sorting & Actuators</h2>
+            
+            <div class="control-group">
+                <label><span>Pan Camera (0-180)</span><span id="pan-val">90°</span></label>
+                <input type="range" id="pan-slider" min="0" max="180" step="5" value="90" oninput="updatePanTilt()">
+            </div>
+            
+            <div class="control-group">
+                <label><span>Tilt Camera (30-150)</span><span id="tilt-val">90°</span></label>
+                <input type="range" id="tilt-slider" min="30" max="150" step="5" value="90" oninput="updatePanTilt()">
+            </div>
+
+            <div class="control-group">
+                <label><span>Dump Servo</span></label>
+                <div class="btn-group">
+                    <button class="btn btn-primary" onclick="setDump(180)">Dump Trash</button>
+                    <button class="btn" onclick="setDump(0)">Reset Bin</button>
+                </div>
+            </div>
+
+            <div class="control-group">
+                <label><span>Conveyor Belt</span></label>
+                <div class="btn-group">
+                    <button class="btn btn-primary" onclick="setConveyor(800.0)">Forward</button>
+                    <button class="btn" onclick="setConveyor(-800.0)">Reverse</button>
+                    <button class="btn btn-danger" onclick="setConveyor(0.0)">Stop</button>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        // 1. Connection
+        var ros = new ROSLIB.Ros({ url : 'ws://localhost:9090' });
+        var statusEl = document.getElementById('status');
+
+        ros.on('connection', function() {
+            statusEl.innerText = "● ONLINE & LINKED";
+            statusEl.className = "connected";
+        });
+        ros.on('error', function() { statusEl.innerText = "● CONNECTION ERROR"; statusEl.className = "disconnected"; });
+        ros.on('close', function() { statusEl.innerText = "● OFFLINE"; statusEl.className = "disconnected"; });
+
+        // 2. Telemetry Subscribers
+        var encListener = new ROSLIB.Topic({ ros: ros, name: '/encoders', messageType: 'std_msgs/msg/Int32MultiArray' });
+        encListener.subscribe(function(m) {
+            document.getElementById('enc-fl').innerText = m.data[0];
+            document.getElementById('enc-rl').innerText = m.data[1];
+            document.getElementById('enc-fr').innerText = m.data[2];
+            document.getElementById('enc-rr').innerText = m.data[3];
+        });
+
+        var colorListener = new ROSLIB.Topic({ ros: ros, name: '/trash_color', messageType: 'geometry_msgs/msg/Vector3' });
+        colorListener.subscribe(function(m) {
+            document.getElementById('col-r').innerText = Math.round(m.x);
+            document.getElementById('col-g').innerText = Math.round(m.y);
+            document.getElementById('col-b').innerText = Math.round(m.z);
+            // Update the live color visualizer
+            document.getElementById('color-swatch').style.backgroundColor = `rgb(${m.x}, ${m.y}, ${m.z})`;
+        });
+
+        // 3. Command Publishers
+        var cmdVel = new ROSLIB.Topic({ ros: ros, name: '/cmd_vel', messageType: 'geometry_msgs/msg/Twist' });
+        function drive(lin, ang) {
+            cmdVel.publish(new ROSLIB.Message({ linear: {x: lin, y: 0, z: 0}, angular: {x: 0, y: 0, z: ang} }));
+        }
+
+        var panTiltCmd = new ROSLIB.Topic({ ros: ros, name: '/pan_tilt_cmd', messageType: 'geometry_msgs/msg/Point' });
+        function updatePanTilt() {
+            var p = document.getElementById('pan-slider').value;
+            var t = document.getElementById('tilt-slider').value;
+            document.getElementById('pan-val').innerText = p + "°";
+            document.getElementById('tilt-val').innerText = t + "°";
+            panTiltCmd.publish(new ROSLIB.Message({ x: parseFloat(p), y: parseFloat(t), z: 0.0 }));
+        }
+
+        var dumpCmd = new ROSLIB.Topic({ ros: ros, name: '/dump_cmd', messageType: 'std_msgs/msg/Float32' });
+        function setDump(angle) { dumpCmd.publish(new ROSLIB.Message({ data: parseFloat(angle) })); }
+
+        var convCmd = new ROSLIB.Topic({ ros: ros, name: '/conveyor_cmd', messageType: 'std_msgs/msg/Float32' });
+        function setConveyor(speed) { convCmd.publish(new ROSLIB.Message({ data: parseFloat(speed) })); }
+
+        // 4. Parameter Service
+        var setParamClient = new ROSLIB.Service({ ros: ros, name: '/esp32_base_controller/set_parameters', serviceType: 'rcl_interfaces/srv/SetParameters' });
+        function updateMaxSpeed(val) {
+            document.getElementById('speed-val').innerText = val;
+            var req = new ROSLIB.ServiceRequest({
+                parameters: [{ name: 'max_speed', value: { type: 3, double_value: parseFloat(val) } }]
+            });
+            setParamClient.callService(req, function(res) { console.log('Speed updated'); });
+        }
+    </script>
+</body>
+</html>
