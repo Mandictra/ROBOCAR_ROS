@@ -186,15 +186,15 @@ void setup() {
   
   conveyor.setMaxSpeed(conv_max_speed);
 
-  // 4. I2C Faarfsensor
+  // 4. I2C Color Sensor
   Wire.begin(I2C_SDA, I2C_SCL);
   if (!tcs.begin()) {
-    Serial.println("TCS34725 net fonnt!");
+    Serial.println("TCS34725 not found!");
   }
 
   delay(2000);
 
-  // 5. ROS 2 Initialisatioun
+  // 5. ROS 2 Initialization[cite: 2]
   allocator = rcl_get_default_allocator();
   RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
   RCCHECK(rclc_node_init_default(&node, "esp32_base_controller", "", &support));
@@ -225,11 +225,11 @@ void setup() {
 }
 
 void loop() {
-  RCSOFTCHECK(rclc_executor_spin_some(&executor, 0)); // 0 Timeout fir de Stepper net ze blockéieren
+  RCSOFTCHECK(rclc_executor_spin_some(&executor, 0)); // 0 Timeout to avoid blocking the stepper[cite: 2]
 
   uint32_t current_time = millis();
 
-  // Encoder Daten publizéieren (All 50ms)
+  // Publish encoder data (Every 50ms)[cite: 2]
   static uint32_t last_enc_pub = 0;
   if (current_time - last_enc_pub > 50) {
     enc_msg.data.data[0] = (int32_t)enc_fl.getCount();
@@ -240,7 +240,7 @@ void loop() {
     last_enc_pub = current_time;
   }
 
-  // Faarfsensor Daten publizéieren (All 100ms)
+  // Publish color sensor data (Every 100ms)[cite: 2]
   static uint32_t last_color_pub = 0;
   if (current_time - last_color_pub > 100) {
     uint16_t r, g, b, c;
@@ -250,11 +250,11 @@ void loop() {
     last_color_pub = current_time;
   }
 
-  // Sécherheetsschalter (Dead Man's Switch) fir Drivmotoren
+  // Safety switch (Dead Man's Switch) for drive motors[cite: 2]
   if (current_time - last_cmd_ms > CMD_TIMEOUT_MS) {
     drive_motors(0, 0);
   }
 
-  // Stepper Motor lafe loossen
+  // Keep the stepper motor running[cite: 2]
   conveyor.runSpeed();
 }
