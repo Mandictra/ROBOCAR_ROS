@@ -2,11 +2,10 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-width=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Autonomous Sorter Dashboard</title>
     <script src="https://cdn.jsdelivr.net/npm/eventemitter2@6.4.9/lib/eventemitter2.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/roslib@1/build/roslib.min.js"></script>
-    
     <style>
         :root { --bg: #0f172a; --panel: #1e293b; --accent: #38bdf8; --danger: #ef4444; --success: #22c55e; --text: #f8fafc; }
         body { font-family: 'Segoe UI', system-ui, sans-serif; background-color: var(--bg); color: var(--text); margin: 0; padding: 20px; }
@@ -15,11 +14,9 @@
         #status { padding: 8px 16px; border-radius: 20px; background: #334155; font-weight: bold; font-size: 0.9rem; }
         .connected { color: var(--success); border: 1px solid var(--success); }
         .disconnected { color: var(--danger); border: 1px solid var(--danger); }
-        
         .dashboard-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; }
         .card { background-color: var(--panel); padding: 20px; border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.3); border: 1px solid #334155; }
         .card h2 { margin-top: 0; font-size: 1.1rem; text-transform: uppercase; letter-spacing: 1px; color: #94a3b8; border-bottom: 1px solid #334155; padding-bottom: 10px; }
-        
         /* Telemetry & Color */
         .data-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px; }
         .data-box { background: #0f172a; padding: 10px; border-radius: 8px; text-align: center; border: 1px solid #334155; }
@@ -27,12 +24,10 @@
         .data-val { font-size: 1.2rem; font-family: monospace; font-weight: bold; color: var(--accent); }
         .color-display { display: flex; align-items: center; justify-content: space-between; background: #0f172a; padding: 10px; border-radius: 8px; border: 1px solid #334155; }
         #color-swatch { width: 50px; height: 50px; border-radius: 50%; background: #000; border: 2px solid #fff; box-shadow: 0 0 10px rgba(0,0,0,0.5); }
-        
         /* Controls */
         .control-group { margin-bottom: 20px; }
         .control-group label { display: flex; justify-content: space-between; font-size: 0.9rem; margin-bottom: 8px; }
         input[type=range] { width: 100%; accent-color: var(--accent); cursor: pointer; }
-        
         .btn-group { display: flex; gap: 10px; }
         .btn { flex: 1; padding: 10px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; transition: 0.2s; background: #334155; color: white; }
         .btn:hover { background: #475569; }
@@ -41,7 +36,8 @@
         .btn-primary:hover { background: #0ea5e9; }
         .btn-danger { background: var(--danger); }
         .btn-danger:hover { background: #dc2626; }
-        
+        .btn-emg { background: #991b1b; color: white; width: 100%; padding: 15px; font-size: 1.1rem; border: 2px solid #f87171; animation: pulse-red 2s infinite; margin-bottom: 15px;}
+        @keyframes pulse-red { 0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); } 70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); } 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); } }
         /* D-Pad */
         .d-pad { display: grid; grid-template-columns: repeat(3, 60px); grid-template-rows: repeat(3, 60px); gap: 10px; justify-content: center; }
         .d-btn { background: #334155; border: none; color: white; border-radius: 8px; font-size: 1.2rem; cursor: pointer; user-select: none; transition: 0.1s; }
@@ -61,7 +57,6 @@
     </div>
 
     <div class="dashboard-grid">
-        
         <!-- TELEMETRY PANEL -->
         <div class="card">
             <h2>Sensor Telemetry</h2>
@@ -86,7 +81,7 @@
         <div class="card">
             <h2>Chassis Control</h2>
             <div class="control-group">
-                <label><span>Speed Limit</span><span id="speed-val">0.5</span></label>
+                <label><span>Speed Limit</span><span id="speed-val">0.5 m/s</span></label>
                 <input type="range" min="0.1" max="1.0" step="0.1" value="0.5" onchange="updateMaxSpeed(this.value)">
             </div>
             <div class="d-pad">
@@ -102,30 +97,28 @@
         <div class="card">
             <h2>Sorting & Actuators</h2>
             
+            <button class="btn btn-emg" onclick="emergencyStop()">MASTER E-STOP</button>
+
             <div class="control-group">
-                <label><span>Pan Camera (0-180)</span><span id="pan-val">90°</span></label>
-                <input type="range" id="pan-slider" min="0" max="180" step="5" value="90" oninput="updatePanTilt()">
-            </div>
-            
-            <div class="control-group">
-                <label><span>Tilt Camera (30-150)</span><span id="tilt-val">90°</span></label>
-                <input type="range" id="tilt-slider" min="30" max="150" step="5" value="90" oninput="updatePanTilt()">
+                <label><span>Pan Camera (Positional)</span><span id="pan-val">90°</span></label>
+                <input type="range" id="pan-slider" min="0" max="180" step="5" value="90" oninput="updatePan()">
             </div>
 
             <div class="control-group">
                 <label><span>Dump Servo</span></label>
                 <div class="btn-group">
-                    <button class="btn btn-primary" onclick="setDump(180)">Dump Trash</button>
-                    <button class="btn" onclick="setDump(0)">Reset Bin</button>
+                    <button class="btn btn-primary" onclick="setDump(175)">Dump Trash</button>
+                    <button class="btn" onclick="setDump(5)">Reset Bin</button>
                 </div>
             </div>
 
             <div class="control-group">
-                <label><span>Conveyor Belt</span></label>
-                <div class="btn-group">
-                    <button class="btn btn-primary" onclick="setConveyor(800.0)">Forward</button>
-                    <button class="btn" onclick="setConveyor(-800.0)">Reverse</button>
-                    <button class="btn btn-danger" onclick="setConveyor(0.0)">Stop</button>
+                <label><span>Stepper Motor (Conveyor)</span><span id="step-val">0 steps/s</span></label>
+                <input type="range" id="stepper-slider" min="-800" max="800" step="50" value="0" oninput="updateStepper()">
+                <div class="btn-group" style="margin-top: 10px;">
+                    <button class="btn btn-primary" onclick="setStepper(800)">Max FWD</button>
+                    <button class="btn btn-danger" onclick="setStepper(0)">STOP</button>
+                    <button class="btn" onclick="setStepper(-800)">Max REV</button>
                 </div>
             </div>
         </div>
@@ -136,7 +129,7 @@
         // 1. Connection
         var ros = new ROSLIB.Ros({ url : 'ws://localhost:9090' });
         var statusEl = document.getElementById('status');
-
+        
         ros.on('connection', function() {
             statusEl.innerText = "● ONLINE & LINKED";
             statusEl.className = "connected";
@@ -158,8 +151,14 @@
             document.getElementById('col-r').innerText = Math.round(m.x);
             document.getElementById('col-g').innerText = Math.round(m.y);
             document.getElementById('col-b').innerText = Math.round(m.z);
-            // Update the live color visualizer
-            document.getElementById('color-swatch').style.backgroundColor = `rgb(${m.x}, ${m.y}, ${m.z})`;
+            
+            // Normalize 16-bit physical sensor data to 8-bit CSS RGB
+            let maxRaw = Math.max(m.x, m.y, m.z, 1); 
+            let cssR = Math.round((m.x / maxRaw) * 255);
+            let cssG = Math.round((m.y / maxRaw) * 255);
+            let cssB = Math.round((m.z / maxRaw) * 255);
+            
+            document.getElementById('color-swatch').style.backgroundColor = `rgb(${cssR}, ${cssG}, ${cssB})`;
         });
 
         // 3. Command Publishers
@@ -169,24 +168,36 @@
         }
 
         var panTiltCmd = new ROSLIB.Topic({ ros: ros, name: '/pan_tilt_cmd', messageType: 'geometry_msgs/msg/Point' });
-        function updatePanTilt() {
-            var p = document.getElementById('pan-slider').value;
-            var t = document.getElementById('tilt-slider').value;
-            document.getElementById('pan-val').innerText = p + "°";
-            document.getElementById('tilt-val').innerText = t + "°";
-            panTiltCmd.publish(new ROSLIB.Message({ x: parseFloat(p), y: parseFloat(t), z: 0.0 }));
+        function updatePan() {
+            var currentPan = parseFloat(document.getElementById('pan-slider').value);
+            document.getElementById('pan-val').innerText = currentPan + "°";
+            panTiltCmd.publish(new ROSLIB.Message({ x: currentPan, y: 90.0, z: 0.0 })); // Y is hardcoded to 90 since tilt is removed
         }
 
         var dumpCmd = new ROSLIB.Topic({ ros: ros, name: '/dump_cmd', messageType: 'std_msgs/msg/Float32' });
         function setDump(angle) { dumpCmd.publish(new ROSLIB.Message({ data: parseFloat(angle) })); }
 
+        // Upgraded Stepper Control
         var convCmd = new ROSLIB.Topic({ ros: ros, name: '/conveyor_cmd', messageType: 'std_msgs/msg/Float32' });
-        function setConveyor(speed) { convCmd.publish(new ROSLIB.Message({ data: parseFloat(speed) })); }
+        function updateStepper() {
+            var speed = parseFloat(document.getElementById('stepper-slider').value);
+            document.getElementById('step-val').innerText = speed + " steps/s";
+            convCmd.publish(new ROSLIB.Message({ data: speed }));
+        }
+        function setStepper(speed) {
+            document.getElementById('stepper-slider').value = speed;
+            updateStepper();
+        }
+
+        function emergencyStop() {
+            drive(0, 0);
+            setStepper(0);
+        }
 
         // 4. Parameter Service
         var setParamClient = new ROSLIB.Service({ ros: ros, name: '/esp32_base_controller/set_parameters', serviceType: 'rcl_interfaces/srv/SetParameters' });
         function updateMaxSpeed(val) {
-            document.getElementById('speed-val').innerText = val;
+            document.getElementById('speed-val').innerText = val + " m/s";
             var req = new ROSLIB.ServiceRequest({
                 parameters: [{ name: 'max_speed', value: { type: 3, double_value: parseFloat(val) } }]
             });
