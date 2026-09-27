@@ -4,14 +4,14 @@
 // ---------- DRV8833 #1 (Front Wheels) ----------
 #define FL_IN1 4
 #define FL_IN2 5
-#define FR_IN1 6
-#define FR_IN2 7
+#define FR_IN1 7
+#define FR_IN2 6
 
 // ---------- DRV8833 #2 (Rear Wheels) ----------
 #define RL_IN1 15
 #define RL_IN2 16
-#define RR_IN1 12
-#define RR_IN2 11
+#define RR_IN1 11
+#define RR_IN2 12
 
 // ---------- Conveyor Stepper ----------
 #define CONV_IN1 41 
@@ -25,9 +25,9 @@
 #define TILT_PIN  37
 #define DUMP_PIN  38
 
-// ---------- I2C Color Sensor ----------
-#define I2C_SDA 47
-#define I2C_SCL 48
+
+#define IR_SENSOR_PIN 47
+
 
 // ---------- PCNT Encoders ----------
 #define ENC_FL_A 17
