@@ -19,19 +19,18 @@
         .card h2 { margin-top: 0; font-size: 1.1rem; text-transform: uppercase; letter-spacing: 1px; color: #94a3b8; border-bottom: 1px solid #334155; padding-bottom: 10px; }
 
         .data-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px; }
+        .data-grid.thirds { grid-template-columns: 1fr 1fr 1fr; }
         .data-box { background: #0f172a; padding: 10px; border-radius: 8px; text-align: center; border: 1px solid #334155; }
         .data-label { font-size: 0.75rem; color: #64748b; text-transform: uppercase; margin-bottom: 5px; }
         .data-val { font-size: 1.2rem; font-family: monospace; font-weight: bold; color: var(--accent); }
         .data-val.stale { color: #64748b; }
-        .sensor-display { display: flex; align-items: center; justify-content: center; background: #0f172a; padding: 20px; border-radius: 8px; border: 1px solid #334155; margin-top: 10px; }
-        #ir-status { font-size: 1.5rem; font-weight: bold; color: var(--danger); letter-spacing: 1px; }
+        
+        .color-display { display: flex; align-items: center; justify-content: space-between; background: #0f172a; padding: 10px; border-radius: 8px; border: 1px solid #334155; margin-top: 10px; }
+        #color-swatch { width: 50px; height: 50px; border-radius: 50%; background: #000; border: 2px solid #fff; box-shadow: 0 0 10px rgba(0,0,0,0.5); }
 
         .control-group { margin-bottom: 20px; }
         .control-group label { display: flex; justify-content: space-between; font-size: 0.9rem; margin-bottom: 8px; }
-        .control-group.disabled { opacity: 0.4; }
-        .control-note { font-size: 0.7rem; color: #64748b; margin-top: 4px; }
         input[type=range] { width: 100%; accent-color: var(--accent); cursor: pointer; }
-        input[type=range]:disabled { cursor: not-allowed; }
         .btn-group { display: flex; gap: 10px; }
         .btn { flex: 1; padding: 10px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; transition: 0.2s; background: #334155; color: white; }
         .btn:hover { background: #475569; }
@@ -70,9 +69,22 @@
                 <div class="data-box"><div class="data-label">Encoder RL</div><div id="enc-rl" class="data-val">0</div></div>
                 <div class="data-box"><div class="data-label">Encoder RR</div><div id="enc-rr" class="data-val">0</div></div>
             </div>
-            <div class="data-label" style="margin-top: 15px;">IR Trigger Sensor (Live)</div>
-            <div class="sensor-display">
-                <div id="ir-status">NO OBJECT</div>
+            
+            <div class="data-label" style="margin-top: 15px;">IMU Acceleration (m/s²)</div>
+            <div class="data-grid thirds">
+                <div class="data-box"><div class="data-label">X</div><div id="imu-x" class="data-val">0.0</div></div>
+                <div class="data-box"><div class="data-label">Y</div><div id="imu-y" class="data-val">0.0</div></div>
+                <div class="data-box"><div class="data-label">Z</div><div id="imu-z" class="data-val">0.0</div></div>
+            </div>
+
+            <div class="data-label" style="margin-top: 15px;">TCS34725 Color Detection (Live)</div>
+            <div class="color-display">
+                <div>
+                    <div><span style="color: #f87171; font-weight:bold;">R:</span> <span id="col-r" class="data-val">0</span></div>
+                    <div><span style="color: #4ade80; font-weight:bold;">G:</span> <span id="col-g" class="data-val">0</span></div>
+                    <div><span style="color: #60a5fa; font-weight:bold;">B:</span> <span id="col-b" class="data-val">0</span></div>
+                </div>
+                <div id="color-swatch"></div>
             </div>
         </div>
 
@@ -84,11 +96,11 @@
                 <input type="range" min="0.1" max="1.0" step="0.1" value="0.5" onchange="updateMaxSpeed(this.value)">
             </div>
             <div class="d-pad">
-                <button class="d-btn d-up" data-lin="-1" data-ang="0">W</button>
-                <button class="d-btn d-left" data-lin="0" data-ang="-1">A</button>
+                <button class="d-btn d-up" data-lin="1" data-ang="0">W</button>
+                <button class="d-btn d-left" data-lin="0" data-ang="1">A</button>
                 <button class="d-btn d-stop" onclick="drive(0, 0)">STOP</button>
-                <button class="d-btn d-right" data-lin="0" data-ang="1">D</button>
-                <button class="d-btn d-down" data-lin="1" data-ang="0">S</button>
+                <button class="d-btn d-right" data-lin="0" data-ang="-1">D</button>
+                <button class="d-btn d-down" data-lin="-1" data-ang="0">S</button>
             </div>
         </div>
 
@@ -125,11 +137,9 @@
     </div>
 
     <script>
-        // ---------- Connection (with auto-reconnect) ----------
         var ros = null;
         var statusEl = document.getElementById('status');
         var reconnectDelayMs = 1000;
-        var lastTelemetryMs = 0;
 
         function connect() {
             ros = new ROSLIB.Ros({ url: 'ws://localhost:9090' });
@@ -159,30 +169,36 @@
             });
         }
 
-        // ---------- Telemetry Subscribers ----------
         function attachTopics() {
             var encListener = new ROSLIB.Topic({ ros: ros, name: '/encoders', messageType: 'std_msgs/msg/Int32MultiArray' });
             encListener.subscribe(function (m) {
-                lastTelemetryMs = Date.now();
-                document.getElementById('enc-fl').innerText = m.data[0];
-                document.getElementById('enc-rl').innerText = m.data[1];
-                document.getElementById('enc-fr').innerText = m.data[2];
-                document.getElementById('enc-rr').innerText = m.data[3];
+                document.getElementById('enc-fr').innerText = m.data[0];
+                document.getElementById('enc-rr').innerText = m.data[1];
+                document.getElementById('enc-fl').innerText = m.data[2];
+                document.getElementById('enc-rl').innerText = m.data[3];
                 ['enc-fl', 'enc-fr', 'enc-rl', 'enc-rr'].forEach(function (id) {
                     document.getElementById(id).classList.remove('stale');
                 });
             });
 
-            var irListener = new ROSLIB.Topic({ ros: ros, name: '/ir_trigger', messageType: 'std_msgs/msg/Bool' });
-            irListener.subscribe(function (m) {
-                var irStatusEl = document.getElementById('ir-status');
-                if (m.data === true) {
-                    irStatusEl.innerText = "OBJECT DETECTED";
-                    irStatusEl.style.color = "var(--success)";
-                } else {
-                    irStatusEl.innerText = "NO OBJECT";
-                    irStatusEl.style.color = "var(--danger)";
-                }
+            var imuListener = new ROSLIB.Topic({ ros: ros, name: '/imu_data', messageType: 'sensor_msgs/msg/Imu' });
+            imuListener.subscribe(function (m) {
+                document.getElementById('imu-x').innerText = m.linear_acceleration.x.toFixed(2);
+                document.getElementById('imu-y').innerText = m.linear_acceleration.y.toFixed(2);
+                document.getElementById('imu-z').innerText = m.linear_acceleration.z.toFixed(2);
+            });
+
+            var colorListener = new ROSLIB.Topic({ ros: ros, name: '/trash_color', messageType: 'geometry_msgs/msg/Vector3' });
+            colorListener.subscribe(function(m) {
+                document.getElementById('col-r').innerText = Math.round(m.x);
+                document.getElementById('col-g').innerText = Math.round(m.y);
+                document.getElementById('col-b').innerText = Math.round(m.z);
+                
+                let maxRaw = Math.max(m.x, m.y, m.z, 1);
+                let cssR = Math.round((m.x / maxRaw) * 255);
+                let cssG = Math.round((m.y / maxRaw) * 255);
+                let cssB = Math.round((m.z / maxRaw) * 255);
+                document.getElementById('color-swatch').style.backgroundColor = `rgb(${cssR}, ${cssG}, ${cssB})`;
             });
 
             cmdVel = new ROSLIB.Topic({ ros: ros, name: '/cmd_vel', messageType: 'geometry_msgs/msg/Twist' });
@@ -230,9 +246,6 @@
             setStepper(0);
         }
 
-        // ---------- D-Pad: Pointer Events, safe against drag-off / interrupted touch ----------
-        // Fixes: old onmousedown/onmouseup pairs never stopped the robot if the
-        // pointer left the button before release (drag off, phone lock, alt-tab).
         document.querySelectorAll('.d-pad .d-btn:not(.d-stop)').forEach(function (btn) {
             var lin = parseFloat(btn.dataset.lin);
             var ang = parseFloat(btn.dataset.ang);
@@ -243,11 +256,6 @@
                 btn.setPointerCapture(e.pointerId);
                 btn.classList.add('active');
                 drive(lin, ang);
-                // Keep re-sending while held - the firmware has a command
-                // timeout failsafe that zeroes motors if it stops hearing
-                // from us, so a single publish on press isn't enough for a
-                // long hold. 150ms should be safely under CMD_TIMEOUT_MS;
-                // check pins.h and shorten this further if it's tighter.
                 if (holdInterval) clearInterval(holdInterval);
                 holdInterval = setInterval(function () { drive(lin, ang); }, 150);
             }
@@ -266,7 +274,6 @@
             btn.addEventListener('lostpointercapture', stop);
         });
 
-        // Belt-and-braces: if literally nothing else fires, releasing anywhere stops the robot.
         window.addEventListener('pointerup', function () {
             document.querySelectorAll('.d-pad .d-btn.active').forEach(function (b) {
                 b.classList.remove('active');
