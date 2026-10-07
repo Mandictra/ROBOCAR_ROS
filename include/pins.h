@@ -48,8 +48,8 @@
 
 
 // ---------- I2C Bus (Shared by Color Sensor & IMU) ----------
-//#define I2C_SDA  39// Add your SDA pin number here
-//#define I2C_SCL  40// Add your SCL pin number here
+#define I2C_SDA  38// Add your SDA pin number here
+#define I2C_SCL  39// Add your SCL pin number here
 
 // ---------- Limits ----------
 #define PAN_MIN   0

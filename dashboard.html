@@ -111,8 +111,13 @@
             <button class="btn btn-emg" onclick="emergencyStop()">MASTER E-STOP</button>
 
             <div class="control-group">
-                <label><span>Pan Camera (Positional)</span><span id="pan-val">90°</span></label>
-                <input type="range" id="pan-slider" min="0" max="180" step="5" value="90" oninput="updatePan()">
+                <label><span>Pan Camera</span><span id="pan-val">90°</span></label>
+                <input type="range" id="pan-slider" min="0" max="180" step="5" value="90" oninput="updatePanTilt()">
+            </div>
+
+            <div class="control-group">
+                <label><span>Tilt Camera</span><span id="tilt-val">90°</span></label>
+                <input type="range" id="tilt-slider" min="0" max="180" step="5" value="90" oninput="updatePanTilt()">
             </div>
 
             <div class="control-group">
@@ -221,10 +226,22 @@
             cmdVel.publish(new ROSLIB.Message({ linear: { x: lin, y: 0, z: 0 }, angular: { x: 0, y: 0, z: ang } }));
         }
 
-        function updatePan() {
+        function updatePanTilt() {
             var currentPan = parseFloat(document.getElementById('pan-slider').value);
+            var currentTilt = parseFloat(document.getElementById('tilt-slider').value);
+            
+            // Update the text labels
             document.getElementById('pan-val').innerText = currentPan + "°";
-            if (panTiltCmd) panTiltCmd.publish(new ROSLIB.Message({ x: currentPan, y: 90.0, z: 0.0 }));
+            document.getElementById('tilt-val').innerText = currentTilt + "°";
+            
+            // Send X (Pan) and Y (Tilt) together
+            if (panTiltCmd) {
+                panTiltCmd.publish(new ROSLIB.Message({ 
+                    x: currentPan, 
+                    y: currentTilt, 
+                    z: 0.0 
+                }));
+            }
         }
 
         function setDump(angle) {
