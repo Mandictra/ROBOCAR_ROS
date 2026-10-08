@@ -2,188 +2,317 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="color-scheme" content="dark">
     <title>Autonomous Sorter Dashboard</title>
     <script src="https://cdn.jsdelivr.net/npm/eventemitter2@6.4.9/lib/eventemitter2.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/roslib@1/build/roslib.min.js"></script>
     <style>
-        :root { --bg: #0f172a; --panel: #1e293b; --accent: #38bdf8; --danger: #ef4444; --success: #22c55e; --text: #f8fafc; }
-        body { font-family: 'Segoe UI', system-ui, sans-serif; background-color: var(--bg); color: var(--text); margin: 0; padding: 20px; }
-        .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #334155; padding-bottom: 10px; margin-bottom: 20px; }
-        h1 { margin: 0; font-size: 1.8rem; letter-spacing: 1px; color: var(--accent); }
-        #status { padding: 8px 16px; border-radius: 20px; background: #334155; font-weight: bold; font-size: 0.9rem; }
-        .connected { color: var(--success); border: 1px solid var(--success); }
-        .disconnected { color: var(--danger); border: 1px solid var(--danger); }
-        .dashboard-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; }
-        .card { background-color: var(--panel); padding: 20px; border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.3); border: 1px solid #334155; }
-        .card h2 { margin-top: 0; font-size: 1.1rem; text-transform: uppercase; letter-spacing: 1px; color: #94a3b8; border-bottom: 1px solid #334155; padding-bottom: 10px; }
+        :root {
+            --bg: #0d1422; --panel: #151e31; --inset: #0d1422; --line: #27334d; --btn: #223049; --btn-hover: #2c3d5d;
+            --text: #e8edf6; --muted: #8c99b3; --accent: #38bdf8;
+            --ok: #34d399; --bad: #f87171; --warn: #fbbf24; --estop: #dc2626;
+            --font: "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+        }
+        * { box-sizing: border-box; }
+        html { -webkit-text-size-adjust: 100%; }
+        body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 15px; line-height: 1.4; font-variant-numeric: tabular-nums; }
+        h1, h2, h3, p { margin: 0; }
+        button { font: inherit; }
+        :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-        .data-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px; }
-        .data-grid.thirds { grid-template-columns: 1fr 1fr 1fr; }
-        .data-box { background: #0f172a; padding: 10px; border-radius: 8px; text-align: center; border: 1px solid #334155; }
-        .data-label { font-size: 0.75rem; color: #64748b; text-transform: uppercase; margin-bottom: 5px; }
-        .data-val { font-size: 1.2rem; font-family: monospace; font-weight: bold; color: var(--accent); }
-        .data-val.stale { color: #64748b; }
-        
-        .color-display { display: flex; align-items: center; justify-content: space-between; background: #0f172a; padding: 10px; border-radius: 8px; border: 1px solid #334155; margin-top: 10px; }
-        #color-swatch { width: 50px; height: 50px; border-radius: 50%; background: #000; border: 2px solid #fff; box-shadow: 0 0 10px rgba(0,0,0,0.5); }
+        /* ---------- Top bar (always visible, E-stop included) ---------- */
+        .topbar { position: sticky; top: 0; z-index: 10; background: var(--bg); border-bottom: 1px solid var(--line);
+                  padding: calc(10px + env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) 10px max(16px, env(safe-area-inset-left)); }
+        .topbar-inner { max-width: 1280px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+        .brand { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; min-width: 0; }
+        h1 { font-size: 1.15rem; font-weight: 650; letter-spacing: 0.2px; }
+        #status { display: inline-flex; align-items: center; gap: 8px; padding: 4px 12px; border-radius: 999px; font-size: 0.85rem; border: 1px solid var(--line); color: var(--muted); }
+        #status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+        #status.connected { color: var(--ok); border-color: rgba(52, 211, 153, 0.45); }
+        #status.disconnected { color: var(--bad); border-color: rgba(248, 113, 113, 0.45); }
+        .estop { flex: none; min-width: 108px; min-height: 48px; padding: 0 20px; border: 2px solid #fca5a5; border-radius: 10px; background: var(--estop); color: #fff; font-weight: 800; letter-spacing: 1px; cursor: pointer; }
+        .estop:hover { background: #b91c1c; }
+        .estop:active { transform: scale(0.97); }
 
-        .control-group { margin-bottom: 20px; }
-        .control-group label { display: flex; justify-content: space-between; font-size: 0.9rem; margin-bottom: 8px; }
-        input[type=range] { width: 100%; accent-color: var(--accent); cursor: pointer; }
-        .btn-group { display: flex; gap: 10px; }
-        .btn { flex: 1; padding: 10px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; transition: 0.2s; background: #334155; color: white; }
-        .btn:hover { background: #475569; }
-        .btn:active { transform: scale(0.95); }
-        .btn-primary { background: var(--accent); color: #000; }
+        /* ---------- Page grid ---------- */
+        .page { max-width: 1280px; margin: 0 auto; padding: 16px max(16px, env(safe-area-inset-right)) calc(28px + env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
+        .console { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); }
+        .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px; min-width: 0; }
+        .panel > h2 { font-size: 1rem; font-weight: 650; margin-bottom: 14px; }
+        @media (min-width: 760px) {
+            .console { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .tele-panel, .sc-panel { grid-column: 1 / -1; }
+        }
+        @media (min-width: 1100px) {
+            .console { grid-template-columns: minmax(300px, 1fr) minmax(300px, 1.1fr) minmax(300px, 1.1fr); }
+            .tele-panel { grid-column: auto; }
+            .sc-panel { grid-column: 1 / -1; }
+        }
+
+        /* ---------- Fields inside panels ---------- */
+        .field + .field { margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--line); }
+        .field-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; font-size: 0.92rem; }
+        .field-head .val { color: var(--accent); font-weight: 650; }
+        .hint { color: var(--muted); font-size: 0.82rem; margin-top: 8px; }
+        .row { display: flex; gap: 10px; }
+        .row .btn { flex: 1; }
+
+        input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 30px; margin: 0; background: transparent; cursor: pointer; }
+        input[type=range]::-webkit-slider-runnable-track { height: 6px; border-radius: 3px; background: var(--line); }
+        input[type=range]::-moz-range-track { height: 6px; border-radius: 3px; background: var(--line); }
+        input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; box-sizing: border-box; width: 22px; height: 22px; margin-top: -8px; border-radius: 50%; background: var(--accent); border: 3px solid var(--panel); box-shadow: 0 0 0 1px var(--accent); }
+        input[type=range]::-moz-range-thumb { box-sizing: border-box; width: 22px; height: 22px; border-radius: 50%; background: var(--accent); border: 3px solid var(--panel); box-shadow: 0 0 0 1px var(--accent); }
+
+        .btn { min-height: 44px; padding: 0 14px; border: 1px solid transparent; border-radius: 8px; background: var(--btn); color: var(--text); font-weight: 600; cursor: pointer; transition: background 0.15s; }
+        .btn:hover { background: var(--btn-hover); }
+        .btn:active { transform: scale(0.97); }
+        .btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+        .btn-primary { background: var(--accent); color: #04121c; }
         .btn-primary:hover { background: #0ea5e9; }
-        .btn-danger { background: var(--danger); }
-        .btn-danger:hover { background: #dc2626; }
-        .btn-emg { background: #991b1b; color: white; width: 100%; padding: 15px; font-size: 1.1rem; border: 2px solid #f87171; animation: pulse-red 2s infinite; margin-bottom: 15px;}
-        @keyframes pulse-red { 0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); } 70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); } 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); } }
+        .btn-stop { background: rgba(248, 113, 113, 0.14); border-color: rgba(248, 113, 113, 0.55); color: #fecaca; }
+        .btn-stop:hover { background: rgba(248, 113, 113, 0.26); }
 
-        .d-pad { display: grid; grid-template-columns: repeat(3, 60px); grid-template-rows: repeat(3, 60px); gap: 10px; justify-content: center; }
-        .d-btn { background: #334155; border: none; color: white; border-radius: 8px; font-size: 1.2rem; cursor: pointer; user-select: none; transition: 0.1s; touch-action: none; }
-        .d-btn.active { background: var(--accent); color: #000; transform: scale(0.95); }
+        /* ---------- Drive pad ---------- */
+        .d-pad { --k: clamp(68px, 21vw, 88px); display: grid; grid-template-columns: repeat(3, var(--k)); grid-template-rows: repeat(3, var(--k)); gap: 10px; justify-content: center; margin-top: 4px; }
+        .d-btn { border: 1px solid var(--line); background: var(--btn); color: var(--text); border-radius: 12px; font-size: 1.5rem; cursor: pointer; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; touch-action: none; transition: background 0.1s; }
+        .d-btn.active { background: var(--accent); border-color: var(--accent); color: #04121c; transform: scale(0.96); }
         .d-up { grid-column: 2; grid-row: 1; }
         .d-left { grid-column: 1; grid-row: 2; }
-        .d-stop { grid-column: 2; grid-row: 2; background: #475569; }
+        .d-stop { grid-column: 2; grid-row: 2; font-size: 0.95rem; font-weight: 700; background: var(--panel); }
         .d-right { grid-column: 3; grid-row: 2; }
         .d-down { grid-column: 2; grid-row: 3; }
+        .pad-hint { text-align: center; }
+
+        /* ---------- Telemetry ---------- */
+        .tele { display: grid; gap: 18px; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); }
+        .tele h3 { font-size: 0.9rem; font-weight: 600; color: var(--muted); margin-bottom: 8px; }
+        .tile-grid { display: grid; gap: 8px; grid-template-columns: repeat(2, 1fr); }
+        .tile-grid.three { grid-template-columns: repeat(3, 1fr); }
+        .tile { background: var(--inset); border-radius: 8px; padding: 8px 12px; }
+        .tile .lbl { display: block; font-size: 0.78rem; color: var(--muted); }
+        .data-val { display: block; font-size: 1.3rem; font-weight: 650; color: var(--accent); }
+        .stale .data-val { color: #55627d; }
+        .stale .dial-arrow { opacity: 0.3; }
+
+        .heading { display: flex; align-items: center; gap: 16px; }
+        .dial { position: relative; flex: none; width: 104px; height: 104px; border-radius: 50%; border: 1px solid var(--line); background: var(--inset); }
+        .dial::before { content: "0°"; position: absolute; top: 3px; left: 0; right: 0; text-align: center; font-size: 0.68rem; color: var(--muted); }
+        .dial-arrow { position: absolute; inset: 14px; display: grid; place-items: center; }
+        .dial-arrow svg { width: 100%; height: 100%; }
+        .heading-vals { display: grid; gap: 8px; flex: 1; }
+
+        .color-row { display: flex; gap: 12px; align-items: stretch; }
+        #color-swatch { flex: none; width: 76px; border-radius: 8px; background: #000; border: 1px solid var(--line); }
+        .color-vals { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; flex: 1; }
+        .rgb-r { color: #f87171; } .rgb-g { color: #4ade80; } .rgb-b { color: #60a5fa; }
+        .tile .lbl.rgb-r, .tile .lbl.rgb-g, .tile .lbl.rgb-b { font-weight: 700; }
+
+        /* ---------- Self-check ---------- */
+        .sc-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 14px; }
+        .sc-head h2 { font-size: 1rem; font-weight: 650; }
+        .sc-head p { color: var(--muted); font-size: 0.85rem; margin-top: 2px; }
+        .sc-groups { display: grid; gap: 18px; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); }
+        .sc-group h3 { font-size: 0.9rem; font-weight: 600; color: var(--muted); margin-bottom: 8px; }
+        .sc-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 9px 12px; margin-bottom: 6px; background: var(--inset); border-radius: 8px; font-size: 0.92rem; }
+        .sc-tag { display: inline-flex; align-items: center; gap: 6px; font-weight: 650; font-size: 0.85rem; white-space: nowrap; }
+        .sc-tag b { display: inline-block; width: 1em; text-align: center; }
+        .sc-none { color: var(--muted); } .sc-pass { color: var(--ok); } .sc-fail { color: var(--bad); } .sc-warn { color: var(--warn); } .sc-run { color: var(--accent); }
+        #sc-summary { margin-top: 12px; color: var(--muted); font-size: 0.85rem; }
+        .sc-msg { padding: 12px; border-radius: 8px; background: var(--inset); border: 1px solid rgba(248, 113, 113, 0.45); color: #fecaca; font-size: 0.9rem; }
+
+        @media (max-width: 420px) {
+            h1 { font-size: 1.02rem; }
+            .estop { min-width: 92px; padding: 0 14px; }
+            .panel { padding: 14px; }
+        }
+        @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
     </style>
 </head>
 <body>
 
-    <div class="header">
-        <h1>Autonomous Sorter Dashboard</h1>
-        <div id="status" class="disconnected">Waiting for ROSBridge...</div>
-    </div>
-
-    <div class="dashboard-grid">
-        <!-- TELEMETRY PANEL -->
-        <div class="card">
-            <h2>Sensor Telemetry</h2>
-            <div class="data-grid">
-                <div class="data-box"><div class="data-label">Encoder FL</div><div id="enc-fl" class="data-val">0</div></div>
-                <div class="data-box"><div class="data-label">Encoder FR</div><div id="enc-fr" class="data-val">0</div></div>
-                <div class="data-box"><div class="data-label">Encoder RL</div><div id="enc-rl" class="data-val">0</div></div>
-                <div class="data-box"><div class="data-label">Encoder RR</div><div id="enc-rr" class="data-val">0</div></div>
+    <header class="topbar">
+        <div class="topbar-inner">
+            <div class="brand">
+                <h1>Autonomous Sorter</h1>
+                <div id="status" class="disconnected">Connecting to ROSBridge…</div>
             </div>
-            
-            <div class="data-label" style="margin-top: 15px;">IMU Acceleration (m/s²)</div>
-            <div class="data-grid thirds">
-                <div class="data-box"><div class="data-label">X</div><div id="imu-x" class="data-val">0.0</div></div>
-                <div class="data-box"><div class="data-label">Y</div><div id="imu-y" class="data-val">0.0</div></div>
-                <div class="data-box"><div class="data-label">Z</div><div id="imu-z" class="data-val">0.0</div></div>
-            </div>
-
-            <div class="data-label" style="margin-top: 15px;">TCS34725 Color Detection (Live)</div>
-            <div class="color-display">
-                <div>
-                    <div><span style="color: #f87171; font-weight:bold;">R:</span> <span id="col-r" class="data-val">0</span></div>
-                    <div><span style="color: #4ade80; font-weight:bold;">G:</span> <span id="col-g" class="data-val">0</span></div>
-                    <div><span style="color: #60a5fa; font-weight:bold;">B:</span> <span id="col-b" class="data-val">0</span></div>
-                </div>
-                <div id="color-swatch"></div>
-            </div>
+            <button class="estop" onclick="emergencyStop()" title="Stops the drive motors and the conveyor">E-STOP</button>
         </div>
+    </header>
 
-        <!-- DRIVE PANEL -->
-        <div class="card">
-            <h2>Chassis Control</h2>
-            <div class="control-group">
-                <label><span>Speed Limit</span><span id="speed-val">0.5 m/s</span></label>
-                <input type="range" min="0.1" max="1.0" step="0.1" value="0.5" onchange="updateMaxSpeed(this.value)">
-            </div>
-            <div class="d-pad">
-                <button class="d-btn d-up" data-lin="1" data-ang="0">W</button>
-                <button class="d-btn d-left" data-lin="0" data-ang="1">A</button>
-                <button class="d-btn d-stop" onclick="drive(0, 0)">STOP</button>
-                <button class="d-btn d-right" data-lin="0" data-ang="-1">D</button>
-                <button class="d-btn d-down" data-lin="-1" data-ang="0">S</button>
-            </div>
-        </div>
+    <main class="page">
+        <div class="console">
 
-        <!-- MANIPULATOR PANEL -->
-        <div class="card">
-            <h2>Sorting &amp; Actuators</h2>
-
-            <button class="btn btn-emg" onclick="emergencyStop()">MASTER E-STOP</button>
-
-            <div class="control-group">
-                <label><span>Pan Camera</span><span id="pan-val">90°</span></label>
-                <input type="range" id="pan-slider" min="0" max="180" step="5" value="90" oninput="updatePanTilt()">
-            </div>
-
-            <div class="control-group">
-                <label><span>Tilt Camera</span><span id="tilt-val">90°</span></label>
-                <input type="range" id="tilt-slider" min="0" max="180" step="5" value="90" oninput="updatePanTilt()">
-            </div>
-
-            <div class="control-group">
-                <label><span>Dump Servo</span></label>
-                <div class="btn-group">
-                    <button class="btn btn-primary" onclick="setDump(175)">Dump Trash</button>
-                    <button class="btn" onclick="setDump(5)">Reset Bin</button>
+            <section class="panel" aria-labelledby="h-drive">
+                <h2 id="h-drive">Drive</h2>
+                <div class="field">
+                    <div class="field-head"><span>Speed limit</span><span class="val" id="speed-val">0.5 m/s</span></div>
+                    <input type="range" min="0.1" max="1.0" step="0.1" value="0.5" onchange="updateMaxSpeed(this.value)" aria-label="Speed limit">
                 </div>
-            </div>
-
-            <div class="control-group">
-                <label><span>Stepper Motor (Conveyor)</span><span id="step-val">0 steps/s</span></label>
-                <input type="range" id="stepper-slider" min="-700" max="700" step="50" value="0" oninput="updateStepper()">
-                <div class="btn-group" style="margin-top: 10px;">
-                    <button class="btn btn-primary" onclick="setStepper(700)">Max FWD</button>
-                    <button class="btn btn-danger" onclick="setStepper(0)">STOP</button>
-                    <button class="btn" onclick="setStepper(-700)">Max REV</button>
+                <div class="field">
+                    <div class="d-pad">
+                        <button class="d-btn d-up" data-lin="1" data-ang="0" aria-label="Forward">&#9650;</button>
+                        <button class="d-btn d-left" data-lin="0" data-ang="1" aria-label="Turn left">&#9664;</button>
+                        <button class="d-btn d-stop" onclick="drive(0, 0)">Stop</button>
+                        <button class="d-btn d-right" data-lin="0" data-ang="-1" aria-label="Turn right">&#9654;</button>
+                        <button class="d-btn d-down" data-lin="-1" data-ang="0" aria-label="Reverse">&#9660;</button>
+                    </div>
+                    <p class="hint pad-hint">Hold a button to drive. Releasing it stops the robot. Laptop: W/↑ forward, S/↓ reverse, A/← left, D/→ right, Space stops.</p>
                 </div>
-            </div>
-        </div>
+            </section>
 
-    </div>
+            <section class="panel" aria-labelledby="h-sort">
+                <h2 id="h-sort">Sorting &amp; actuators</h2>
+
+                <div class="field">
+                    <div class="field-head"><span>Camera pan</span><span class="val" id="pan-val">90°</span></div>
+                    <input type="range" id="pan-slider" min="0" max="180" step="5" value="90" oninput="updatePanTilt()" aria-label="Camera pan">
+                    <div class="field-head" style="margin-top: 8px;"><span>Camera tilt</span><span class="val" id="tilt-val">90°</span></div>
+                    <input type="range" id="tilt-slider" min="0" max="180" step="5" value="90" oninput="updatePanTilt()" aria-label="Camera tilt">
+                    <div class="row" style="margin-top: 10px;"><button class="btn" onclick="centerCamera()">Center camera</button></div>
+                </div>
+
+                <div class="field">
+                    <div class="field-head"><span>Dump bin</span></div>
+                    <div class="row">
+                        <button class="btn btn-primary" onclick="setDump(175)">Dump trash</button>
+                        <button class="btn" onclick="setDump(5)">Reset bin</button>
+                    </div>
+                </div>
+
+                <div class="field">
+                    <div class="field-head"><span>Conveyor</span><span class="val" id="step-val">0 steps/s</span></div>
+                    <input type="range" id="stepper-slider" min="-700" max="700" step="50" value="0" oninput="updateStepper()" aria-label="Conveyor speed">
+                    <div class="row" style="margin-top: 10px;">
+                        <button class="btn btn-primary" onclick="setStepper(700)">Full forward</button>
+                        <button class="btn btn-stop" onclick="setStepper(0)">Stop</button>
+                        <button class="btn" onclick="setStepper(-700)">Full reverse</button>
+                    </div>
+                </div>
+            </section>
+
+            <section class="panel tele-panel" aria-labelledby="h-tele">
+                <h2 id="h-tele">Telemetry</h2>
+                <div class="tele">
+
+                    <div id="grp-heading" class="stale">
+                        <h3>Heading</h3>
+                        <div class="heading">
+                            <div class="dial" aria-hidden="true">
+                                <div class="dial-arrow" id="dial-arrow">
+                                    <svg viewBox="0 0 40 40"><path d="M20 4 L31 33 L20 27 L9 33 Z" fill="#38bdf8"/></svg>
+                                </div>
+                            </div>
+                            <div class="heading-vals">
+                                <div class="tile"><span class="lbl">Yaw (°)</span><span id="imu-yaw" class="data-val">0.0</span></div>
+                                <div class="tile"><span class="lbl">Gyro Z (°/s)</span><span id="imu-gz" class="data-val">0.0</span></div>
+                            </div>
+                        </div>
+                        <p class="hint">0° is the heading at power-on. Gyro only, so it drifts slowly.</p>
+                    </div>
+
+                    <div id="grp-enc" class="stale">
+                        <h3>Wheel encoders</h3>
+                        <div class="tile-grid">
+                            <div class="tile"><span class="lbl">Front left</span><span id="enc-fl" class="data-val">0</span></div>
+                            <div class="tile"><span class="lbl">Front right</span><span id="enc-fr" class="data-val">0</span></div>
+                            <div class="tile"><span class="lbl">Rear left</span><span id="enc-rl" class="data-val">0</span></div>
+                            <div class="tile"><span class="lbl">Rear right</span><span id="enc-rr" class="data-val">0</span></div>
+                        </div>
+                    </div>
+
+                    <div id="grp-accel" class="stale">
+                        <h3>Acceleration (m/s²)</h3>
+                        <div class="tile-grid three">
+                            <div class="tile"><span class="lbl">X</span><span id="imu-x" class="data-val">0.0</span></div>
+                            <div class="tile"><span class="lbl">Y</span><span id="imu-y" class="data-val">0.0</span></div>
+                            <div class="tile"><span class="lbl">Z</span><span id="imu-z" class="data-val">0.0</span></div>
+                        </div>
+                    </div>
+
+                    <div id="grp-color" class="stale">
+                        <h3>Color sensor (TCS34725)</h3>
+                        <div class="color-row">
+                            <div id="color-swatch"></div>
+                            <div class="color-vals">
+                                <div class="tile"><span class="lbl rgb-r">R</span><span id="col-r" class="data-val">0</span></div>
+                                <div class="tile"><span class="lbl rgb-g">G</span><span id="col-g" class="data-val">0</span></div>
+                                <div class="tile"><span class="lbl rgb-b">B</span><span id="col-b" class="data-val">0</span></div>
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+            </section>
+
+            <section class="panel sc-panel" aria-labelledby="h-sc">
+                <div class="sc-head">
+                    <div>
+                        <h2 id="h-sc">System self-check</h2>
+                        <p>Spins each wheel and sweeps the servos and conveyor. Put the robot on blocks first.</p>
+                    </div>
+                    <button id="sc-run" class="btn btn-primary" onclick="runSelfCheck()" disabled>Run self-check</button>
+                </div>
+                <div id="sc-list" class="sc-groups"></div>
+                <p id="sc-summary"></p>
+            </section>
+
+        </div>
+    </main>
 
     <script>
         var ros = null;
         var statusEl = document.getElementById('status');
         var reconnectDelayMs = 1000;
+        var cmdVel, panTiltCmd, dumpCmd, convCmd, speedCmd, scCmd;
+
+        // Use whichever machine served this page; fall back to the laptop IP when opened as a file
+        var HOST = location.hostname || '192.168.100.3';
+
+        function setStatus(text, ok) {
+            statusEl.innerText = text;
+            statusEl.className = ok ? 'connected' : 'disconnected';
+        }
 
         function connect() {
-            ros = new ROSLIB.Ros({ url: 'ws://localhost:9090' });
+            ros = new ROSLIB.Ros({ url: 'ws://' + HOST + ':9090' });
 
             ros.on('connection', function () {
-                statusEl.innerText = "● ONLINE & LINKED";
-                statusEl.className = "connected";
+                setStatus('Connected to ' + HOST, true);
                 reconnectDelayMs = 1000;
                 attachTopics();
+                setScBusy(scWaiting);
             });
             ros.on('error', function () {
-                statusEl.innerText = "● CONNECTION ERROR";
-                statusEl.className = "disconnected";
+                setStatus('Connection error', false);
             });
             ros.on('close', function () {
-                statusEl.innerText = "● OFFLINE — retrying...";
-                statusEl.className = "disconnected";
+                setStatus('Disconnected, retrying…', false);
                 markTelemetryStale();
+                setScBusy(scWaiting);
                 setTimeout(connect, reconnectDelayMs);
                 reconnectDelayMs = Math.min(reconnectDelayMs * 1.5, 10000);
             });
         }
 
+        function setStale(ids, on) {
+            ids.forEach(function (id) { document.getElementById(id).classList.toggle('stale', on); });
+        }
+
         function markTelemetryStale() {
-            ['enc-fl', 'enc-fr', 'enc-rl', 'enc-rr'].forEach(function (id) {
-                document.getElementById(id).classList.add('stale');
-            });
+            setStale(['grp-heading', 'grp-enc', 'grp-accel', 'grp-color'], true);
         }
 
         function attachTopics() {
+            // Firmware publishes encoders as [FL, RL, FR, RR]
             var encListener = new ROSLIB.Topic({ ros: ros, name: '/encoders', messageType: 'std_msgs/msg/Int32MultiArray' });
             encListener.subscribe(function (m) {
-                document.getElementById('enc-fr').innerText = m.data[0];
-                document.getElementById('enc-rr').innerText = m.data[1];
-                document.getElementById('enc-fl').innerText = m.data[2];
-                document.getElementById('enc-rl').innerText = m.data[3];
-                ['enc-fl', 'enc-fr', 'enc-rl', 'enc-rr'].forEach(function (id) {
-                    document.getElementById(id).classList.remove('stale');
-                });
+                document.getElementById('enc-fl').innerText = m.data[0];
+                document.getElementById('enc-rl').innerText = m.data[1];
+                document.getElementById('enc-fr').innerText = m.data[2];
+                document.getElementById('enc-rr').innerText = m.data[3];
+                setStale(['grp-enc'], false);
             });
 
             var imuListener = new ROSLIB.Topic({ ros: ros, name: '/imu_data', messageType: 'sensor_msgs/msg/Imu' });
@@ -191,19 +320,29 @@
                 document.getElementById('imu-x').innerText = m.linear_acceleration.x.toFixed(2);
                 document.getElementById('imu-y').innerText = m.linear_acceleration.y.toFixed(2);
                 document.getElementById('imu-z').innerText = m.linear_acceleration.z.toFixed(2);
+
+                var q = m.orientation;
+                var yaw = Math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z));
+                var yawDeg = yaw * 180 / Math.PI;
+                document.getElementById('imu-yaw').innerText = yawDeg.toFixed(1);
+                document.getElementById('imu-gz').innerText = (m.angular_velocity.z * 180 / Math.PI).toFixed(2);
+                // Positive yaw is counter-clockwise; CSS rotate() is clockwise
+                document.getElementById('dial-arrow').style.transform = 'rotate(' + (-yawDeg) + 'deg)';
+                setStale(['grp-heading', 'grp-accel'], false);
             });
 
             var colorListener = new ROSLIB.Topic({ ros: ros, name: '/trash_color', messageType: 'geometry_msgs/msg/Vector3' });
-            colorListener.subscribe(function(m) {
+            colorListener.subscribe(function (m) {
                 document.getElementById('col-r').innerText = Math.round(m.x);
                 document.getElementById('col-g').innerText = Math.round(m.y);
                 document.getElementById('col-b').innerText = Math.round(m.z);
-                
-                let maxRaw = Math.max(m.x, m.y, m.z, 1);
-                let cssR = Math.round((m.x / maxRaw) * 255);
-                let cssG = Math.round((m.y / maxRaw) * 255);
-                let cssB = Math.round((m.z / maxRaw) * 255);
-                document.getElementById('color-swatch').style.backgroundColor = `rgb(${cssR}, ${cssG}, ${cssB})`;
+
+                var maxRaw = Math.max(m.x, m.y, m.z, 1);
+                var cssR = Math.round((m.x / maxRaw) * 255);
+                var cssG = Math.round((m.y / maxRaw) * 255);
+                var cssB = Math.round((m.z / maxRaw) * 255);
+                document.getElementById('color-swatch').style.backgroundColor = 'rgb(' + cssR + ', ' + cssG + ', ' + cssB + ')';
+                setStale(['grp-color'], false);
             });
 
             cmdVel = new ROSLIB.Topic({ ros: ros, name: '/cmd_vel', messageType: 'geometry_msgs/msg/Twist' });
@@ -211,9 +350,84 @@
             dumpCmd = new ROSLIB.Topic({ ros: ros, name: '/dump_cmd', messageType: 'std_msgs/msg/Float32' });
             convCmd = new ROSLIB.Topic({ ros: ros, name: '/conveyor_cmd', messageType: 'std_msgs/msg/Float32' });
             speedCmd = new ROSLIB.Topic({ ros: ros, name: '/max_speed_cmd', messageType: 'std_msgs/msg/Float32' });
+
+            scCmd = new ROSLIB.Topic({ ros: ros, name: '/self_check_cmd', messageType: 'std_msgs/msg/Int32' });
+            var scListener = new ROSLIB.Topic({ ros: ros, name: '/self_check', messageType: 'std_msgs/msg/Int32' });
+            scListener.subscribe(onSelfCheck);
         }
 
-        var cmdVel, panTiltCmd, dumpCmd, convCmd, speedCmd;
+        // ---- Self-check ----
+        var SC_NAMES = ['MPU6050 IMU', 'TCS34725 colour', 'Motor FL', 'Motor RL', 'Motor FR', 'Motor RR',
+                        'Pan servo', 'Tilt servo', 'Dump servo', 'Conveyor stepper'];
+        var SC_GROUPS = [
+            { title: 'Sensors', items: [0, 1] },
+            { title: 'Drive motors', items: [2, 3, 4, 5] },
+            { title: 'Actuators', items: [6, 7, 8, 9] }
+        ];
+        var SC_LABELS = ['Not run', 'Pass', 'Fail', 'Ran, check by eye'];
+        var SC_CLASSES = ['sc-none', 'sc-pass', 'sc-fail', 'sc-warn'];
+        var SC_ICONS = ['–', '✓', '✕', '!'];
+        var scLastToggle = null, scToggleAtClick = null, scWaiting = false, scTimer = null;
+
+        function setScBusy(busy) {
+            var btn = document.getElementById('sc-run');
+            btn.textContent = busy ? 'Running…' : 'Run self-check';
+            btn.disabled = busy || !(ros && ros.isConnected);
+        }
+
+        function renderSelfCheck(states, running) {
+            var html = '';
+            SC_GROUPS.forEach(function (g) {
+                html += '<div class="sc-group"><h3>' + g.title + '</h3>';
+                g.items.forEach(function (i) {
+                    var label = running ? 'Running…' : SC_LABELS[states[i]];
+                    var cls = running ? 'sc-run' : SC_CLASSES[states[i]];
+                    var icon = running ? '…' : SC_ICONS[states[i]];
+                    html += '<div class="sc-row"><span>' + SC_NAMES[i] + '</span><span class="sc-tag ' + cls + '"><b aria-hidden="true">' + icon + '</b>' + label + '</span></div>';
+                });
+                html += '</div>';
+            });
+            document.getElementById('sc-list').innerHTML = html;
+
+            var summary = document.getElementById('sc-summary');
+            if (running) { summary.textContent = 'Self-check in progress. This takes about 7 seconds.'; return; }
+            var pass = 0, fail = 0, eye = 0;
+            states.forEach(function (s) { if (s === 1) pass++; else if (s === 2) fail++; else if (s === 3) eye++; });
+            summary.textContent = (pass + fail + eye === 0)
+                ? 'Not run since the robot powered on.'
+                : 'Last run: ' + pass + ' passed, ' + fail + ' failed, ' + eye + ' need a visual check.';
+        }
+
+        function onSelfCheck(m) {
+            var v = m.data;
+            var toggle = (v >> 30) & 1;
+            scLastToggle = toggle;
+            if (scWaiting && toggle !== scToggleAtClick) {
+                scWaiting = false;
+                clearTimeout(scTimer);
+                setScBusy(false);
+            }
+            if (scWaiting) return;
+            var states = [];
+            for (var i = 0; i < SC_NAMES.length; i++) states.push((v >> (2 * i)) & 3);
+            renderSelfCheck(states, false);
+        }
+
+        function runSelfCheck() {
+            if (!scCmd) return;
+            if (!confirm('Robot on blocks with the wheels off the ground? Wheels, servos and conveyor will move.')) return;
+            scWaiting = true;
+            scToggleAtClick = scLastToggle;
+            setScBusy(true);
+            renderSelfCheck([], true);
+            scCmd.publish(new ROSLIB.Message({ data: 1 }));
+            scTimer = setTimeout(function () {
+                scWaiting = false;   // no result: robot may have ignored it because it was driving
+                setScBusy(false);
+                document.getElementById('sc-list').innerHTML = '<div class="sc-msg" style="grid-column: 1 / -1;">No result after 20 s. The robot may have ignored the request because it was driving, or it is not responding. Press Stop, wait a second, then try again.</div>';
+                document.getElementById('sc-summary').textContent = '';
+            }, 20000);
+        }
 
         function updateMaxSpeed(val) {
             document.getElementById('speed-val').innerText = val + " m/s";
@@ -229,19 +443,19 @@
         function updatePanTilt() {
             var currentPan = parseFloat(document.getElementById('pan-slider').value);
             var currentTilt = parseFloat(document.getElementById('tilt-slider').value);
-            
-            // Update the text labels
+
             document.getElementById('pan-val').innerText = currentPan + "°";
             document.getElementById('tilt-val').innerText = currentTilt + "°";
-            
-            // Send X (Pan) and Y (Tilt) together
+
             if (panTiltCmd) {
-                panTiltCmd.publish(new ROSLIB.Message({ 
-                    x: currentPan, 
-                    y: currentTilt, 
-                    z: 0.0 
-                }));
+                panTiltCmd.publish(new ROSLIB.Message({ x: currentPan, y: currentTilt, z: 0.0 }));
             }
+        }
+
+        function centerCamera() {
+            document.getElementById('pan-slider').value = 90;
+            document.getElementById('tilt-slider').value = 90;
+            updatePanTilt();
         }
 
         function setDump(angle) {
@@ -253,6 +467,7 @@
             document.getElementById('step-val').innerText = speed + " steps/s";
             if (convCmd) convCmd.publish(new ROSLIB.Message({ data: speed }));
         }
+
         function setStepper(speed) {
             document.getElementById('stepper-slider').value = speed;
             updateStepper();
@@ -276,7 +491,7 @@
                 if (holdInterval) clearInterval(holdInterval);
                 holdInterval = setInterval(function () { drive(lin, ang); }, 150);
             }
-            function stop(e) {
+            function stop() {
                 btn.classList.remove('active');
                 if (holdInterval) {
                     clearInterval(holdInterval);
@@ -289,6 +504,7 @@
             btn.addEventListener('pointerup', stop);
             btn.addEventListener('pointercancel', stop);
             btn.addEventListener('lostpointercapture', stop);
+            btn.addEventListener('contextmenu', function (e) { e.preventDefault(); });
         });
 
         window.addEventListener('pointerup', function () {
@@ -297,6 +513,139 @@
             });
         });
 
+        // ---------- Keyboard drive control ----------
+        // WASD and arrow keys are mapped to the same drive commands as the
+        // on-screen D-pad. The command is continuously refreshed while the
+        // key is held, and the robot stops when the key is released.
+        var keyboardDrive = {
+            'w': [1, 0],
+            'ArrowUp': [1, 0],
+            's': [-1, 0],
+            'ArrowDown': [-1, 0],
+            'a': [0, 1],
+            'ArrowLeft': [0, 1],
+            'd': [0, -1],
+            'ArrowRight': [0, -1]
+        };
+
+        var pressedKeys = new Set();
+        var keyboardHoldInterval = null;
+        var activeKeyboardCommand = null;
+
+        function isTypingTarget(el) {
+            if (!el) return false;
+            var tag = el.tagName;
+            return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' ||
+                   el.isContentEditable;
+        }
+
+        function getKeyboardCommand() {
+            // Forward/reverse take priority over turning if multiple keys
+            // are pressed. This also gives W+A / W+D useful behavior.
+            var forward = pressedKeys.has('w') || pressedKeys.has('ArrowUp');
+            var reverse = pressedKeys.has('s') || pressedKeys.has('ArrowDown');
+            var left = pressedKeys.has('a') || pressedKeys.has('ArrowLeft');
+            var right = pressedKeys.has('d') || pressedKeys.has('ArrowRight');
+
+            var lin = forward ? 1 : (reverse ? -1 : 0);
+            var ang = left ? 1 : (right ? -1 : 0);
+
+            if (lin === 0 && ang === 0) return null;
+            return [lin, ang];
+        }
+
+        function refreshKeyboardDrive() {
+            var command = getKeyboardCommand();
+
+            if (!command) {
+                activeKeyboardCommand = null;
+                if (keyboardHoldInterval) {
+                    clearInterval(keyboardHoldInterval);
+                    keyboardHoldInterval = null;
+                }
+                drive(0, 0);
+                return;
+            }
+
+            activeKeyboardCommand = command;
+            drive(command[0], command[1]);
+
+            if (!keyboardHoldInterval) {
+                keyboardHoldInterval = setInterval(function () {
+                    var current = getKeyboardCommand();
+                    if (!current) {
+                        refreshKeyboardDrive();
+                        return;
+                    }
+                    activeKeyboardCommand = current;
+                    drive(current[0], current[1]);
+                }, 100);
+            }
+        }
+
+        window.addEventListener('keydown', function (e) {
+            if (isTypingTarget(e.target)) return;
+
+            var key = e.key;
+            if (key.length === 1) key = key.toLowerCase();
+
+            // Space is an immediate stop command.
+            if (key === ' ') {
+                e.preventDefault();
+                pressedKeys.clear();
+                refreshKeyboardDrive();
+                return;
+            }
+
+            if (!keyboardDrive[key]) return;
+
+            e.preventDefault();
+
+            // Ignore key-repeat events; the interval above keeps the command
+            // alive while the physical key remains held.
+            if (pressedKeys.has(key)) return;
+
+            pressedKeys.add(key);
+            refreshKeyboardDrive();
+        });
+
+        window.addEventListener('keyup', function (e) {
+            var key = e.key;
+            if (key.length === 1) key = key.toLowerCase();
+
+            if (!keyboardDrive[key]) return;
+
+            e.preventDefault();
+            pressedKeys.delete(key);
+            refreshKeyboardDrive();
+        });
+
+        // Safety: release all keyboard commands if the browser/tab loses
+        // focus, becomes hidden, or the user releases the pointer.
+        function stopAllDriveInput() {
+            pressedKeys.clear();
+
+            if (keyboardHoldInterval) {
+                clearInterval(keyboardHoldInterval);
+                keyboardHoldInterval = null;
+            }
+
+            activeKeyboardCommand = null;
+            drive(0, 0);
+
+            document.querySelectorAll('.d-pad .d-btn.active').forEach(function (b) {
+                b.classList.remove('active');
+            });
+        }
+
+        // Phone safety: stop if the tab is hidden or the browser loses focus
+        document.addEventListener('visibilitychange', function () {
+            if (document.hidden) stopAllDriveInput();
+        });
+
+        window.addEventListener('blur', stopAllDriveInput);
+
+        renderSelfCheck([0, 0, 0, 0, 0, 0, 0, 0, 0, 0], false);
         connect();
     </script>
 </body>
