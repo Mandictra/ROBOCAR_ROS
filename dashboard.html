@@ -153,9 +153,9 @@
                 <div class="field">
                     <div class="d-pad">
                         <button class="d-btn d-up" data-lin="1" data-ang="0" aria-label="Forward">&#9650;</button>
-                        <button class="d-btn d-left" data-lin="0" data-ang="1" aria-label="Turn left">&#9664;</button>
+                        <button class="d-btn d-left" data-lin="0" data-ang="-1" aria-label="Turn left">&#9664;</button>
                         <button class="d-btn d-stop" onclick="drive(0, 0)">Stop</button>
-                        <button class="d-btn d-right" data-lin="0" data-ang="-1" aria-label="Turn right">&#9654;</button>
+                        <button class="d-btn d-right" data-lin="0" data-ang="1" aria-label="Turn right">&#9654;</button>
                         <button class="d-btn d-down" data-lin="-1" data-ang="0" aria-label="Reverse">&#9660;</button>
                     </div>
                     <p class="hint pad-hint">Hold a button to drive. Releasing it stops the robot. Laptop: W/↑ forward, S/↓ reverse, A/← left, D/→ right, Space stops.</p>
@@ -345,7 +345,7 @@
                 setStale(['grp-color'], false);
             });
 
-            cmdVel = new ROSLIB.Topic({ ros: ros, name: '/cmd_vel', messageType: 'geometry_msgs/msg/Twist' });
+            cmdVel = new ROSLIB.Topic({ ros: ros, name: '/cmd_vel_raw', messageType: 'geometry_msgs/msg/Twist' });
             panTiltCmd = new ROSLIB.Topic({ ros: ros, name: '/pan_tilt_cmd', messageType: 'geometry_msgs/msg/Point' });
             dumpCmd = new ROSLIB.Topic({ ros: ros, name: '/dump_cmd', messageType: 'std_msgs/msg/Float32' });
             convCmd = new ROSLIB.Topic({ ros: ros, name: '/conveyor_cmd', messageType: 'std_msgs/msg/Float32' });
@@ -514,18 +514,15 @@
         });
 
         // ---------- Keyboard drive control ----------
-        // WASD and arrow keys are mapped to the same drive commands as the
-        // on-screen D-pad. The command is continuously refreshed while the
-        // key is held, and the robot stops when the key is released.
         var keyboardDrive = {
             'w': [1, 0],
             'ArrowUp': [1, 0],
             's': [-1, 0],
             'ArrowDown': [-1, 0],
-            'a': [0, 1],
-            'ArrowLeft': [0, 1],
-            'd': [0, -1],
-            'ArrowRight': [0, -1]
+            'a': [0, -1],
+            'ArrowLeft': [0, -1],
+            'd': [0, 1],
+            'ArrowRight': [0, 1]
         };
 
         var pressedKeys = new Set();
@@ -540,8 +537,6 @@
         }
 
         function getKeyboardCommand() {
-            // Forward/reverse take priority over turning if multiple keys
-            // are pressed. This also gives W+A / W+D useful behavior.
             var forward = pressedKeys.has('w') || pressedKeys.has('ArrowUp');
             var reverse = pressedKeys.has('s') || pressedKeys.has('ArrowDown');
             var left = pressedKeys.has('a') || pressedKeys.has('ArrowLeft');
@@ -589,7 +584,6 @@
             var key = e.key;
             if (key.length === 1) key = key.toLowerCase();
 
-            // Space is an immediate stop command.
             if (key === ' ') {
                 e.preventDefault();
                 pressedKeys.clear();
@@ -601,8 +595,6 @@
 
             e.preventDefault();
 
-            // Ignore key-repeat events; the interval above keeps the command
-            // alive while the physical key remains held.
             if (pressedKeys.has(key)) return;
 
             pressedKeys.add(key);
@@ -620,8 +612,6 @@
             refreshKeyboardDrive();
         });
 
-        // Safety: release all keyboard commands if the browser/tab loses
-        // focus, becomes hidden, or the user releases the pointer.
         function stopAllDriveInput() {
             pressedKeys.clear();
 
@@ -638,7 +628,6 @@
             });
         }
 
-        // Phone safety: stop if the tab is hidden or the browser loses focus
         document.addEventListener('visibilitychange', function () {
             if (document.hidden) stopAllDriveInput();
         });

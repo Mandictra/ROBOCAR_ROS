@@ -9,7 +9,7 @@ class AutonomousSorter(Node):
 
         # Publishers
         self.conveyor_pub = self.create_publisher(Float32, '/conveyor_cmd', 10)
-        self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel_raw', 10)
 
         # Subscribers
         self.ir_sub = self.create_subscription(Bool, '/ir_trigger', self.ir_callback, 10)
