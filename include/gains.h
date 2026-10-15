@@ -4,7 +4,7 @@
 struct Gain { float kp, ki, kd, ff, off; };   // PWM/rpm, PWM/(rpm*s), -, PWM/rpm, PWM
 struct MotorGains { Gain fwd, rev; };          // fwd: target > 0, rev: target < 0
 
-constexpr MotorGains GAINS_FL = {{0.13f, 4.29f, 0.0f, 0.845f, 138.9f}, {0.28f, 9.4f, 0.0f, 1.768f, 9.2f}};
-constexpr MotorGains GAINS_FR = {{0.27f, 9.07f, 0.0f, 1.787f, 9.0f}, {0.16f, 5.29f, 0.0f, 0.856f, 139.1f}};
-constexpr MotorGains GAINS_RL = {{0.35f, 9.76f, 0.0f, 1.836f, 7.3f}, {0.15f, 5.04f, 0.0f, 0.816f, 139.5f}};
-constexpr MotorGains GAINS_RR = {{0.13f, 4.33f, 0.0f, 0.853f, 139.1f}, {0.44f, 12.2f, 0.0f, 1.868f, 7.6f}};
+constexpr MotorGains GAINS_FL = {{0.14f, 4.61f, 0.0f, 0.747f, 137.8f}, {0.29f, 9.64f, 0.0f, 1.56f, 7.5f}};
+constexpr MotorGains GAINS_FR = {{0.29f, 9.72f, 0.0f, 1.574f, 7.6f}, {0.17f, 4.7f, 0.0f, 0.76f, 137.5f}};
+constexpr MotorGains GAINS_RL = {{0.28f, 8.25f, 0.0f, 1.624f, 5.8f}, {0.15f, 3.87f, 0.0f, 0.727f, 138.0f}};
+constexpr MotorGains GAINS_RR = {{0.15f, 4.08f, 0.0f, 0.768f, 137.4f}, {0.32f, 8.85f, 0.0f, 1.665f, 5.9f}};
