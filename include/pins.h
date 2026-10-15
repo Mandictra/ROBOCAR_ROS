@@ -3,29 +3,31 @@
 
 // ---------- Drive Motors (H-bridge IN1/IN2 + quadrature encoder A/B) ----------
 
-// ------- MOTOR 1 (FL)
+// Wheel labels are from the robot's own perspective (standing behind it, looking the way it drives).
+
+// ------- MOTOR FL
 #define FL_IN1 13
 #define FL_IN2 14
-#define ENC_FL_A 11
-#define ENC_FL_B 12
+#define ENC_FL_A 46   // Swapped A/B to fix negative reading
+#define ENC_FL_B 8    // GPIO46: strapping pin on the ESP32-S3
 
-// ------- MOTOR 2 (FR)
+// ------- MOTOR FR
 #define FR_IN1 9
 #define FR_IN2 10
-#define ENC_FR_A 8
-#define ENC_FR_B 46   // GPIO46: strapping pin on the ESP32-S3
+#define ENC_FR_A 12
+#define ENC_FR_B 11
 
-// ------- MOTOR 3 (RL), unchanged
+// ------- MOTOR RL
 #define RL_IN1 4
 #define RL_IN2 5
-#define ENC_RL_A 7
-#define ENC_RL_B 6
+#define ENC_RL_A 17   // Hardware check required: read 0 during test
+#define ENC_RL_B 18
 
-// ------- MOTOR 4 (RR)
+// ------- MOTOR RR
 #define RR_IN1 15
 #define RR_IN2 16
-#define ENC_RR_A 17
-#define ENC_RR_B 18
+#define ENC_RR_A 7
+#define ENC_RR_B 6
 
 // +1 = positive command drives that wheel forward, -1 = reversed
 #define MOTOR_DIR_FL 1
@@ -40,12 +42,11 @@
 #define CONV_IN4 1
 
 // ---------- Servo Actuators ----------
-#define PAN_PIN   21
-#define TILT_PIN  47
+#define PAN_PIN   47
+#define TILT_PIN  21
 #define DUMP_PIN  48
 
 // ---------- Sensors ----------
-
 
 // ---------- I2C Bus (Shared by Color Sensor & IMU) ----------
 #define I2C_SDA  38// Add your SDA pin number here

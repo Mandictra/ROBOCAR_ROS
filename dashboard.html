@@ -153,9 +153,9 @@
                 <div class="field">
                     <div class="d-pad">
                         <button class="d-btn d-up" data-lin="1" data-ang="0" aria-label="Forward">&#9650;</button>
-                        <button class="d-btn d-left" data-lin="0" data-ang="-1" aria-label="Turn left">&#9664;</button>
+                        <button class="d-btn d-left" data-lin="0" data-ang="1" aria-label="Turn left">&#9664;</button>
                         <button class="d-btn d-stop" onclick="drive(0, 0)">Stop</button>
-                        <button class="d-btn d-right" data-lin="0" data-ang="1" aria-label="Turn right">&#9654;</button>
+                        <button class="d-btn d-right" data-lin="0" data-ang="-1" aria-label="Turn right">&#9654;</button>
                         <button class="d-btn d-down" data-lin="-1" data-ang="0" aria-label="Reverse">&#9660;</button>
                     </div>
                     <p class="hint pad-hint">Hold a button to drive. Releasing it stops the robot. Laptop: W/↑ forward, S/↓ reverse, A/← left, D/→ right, Space stops.</p>
@@ -209,7 +209,7 @@
                                 <div class="tile"><span class="lbl">Gyro Z (°/s)</span><span id="imu-gz" class="data-val">0.0</span></div>
                             </div>
                         </div>
-                        <p class="hint">0° is the heading at power-on. Gyro only, so it drifts slowly.</p>
+                        <p class="hint">0° is the heading at power-on.  EKF yaw (gyro + encoders)., so it drifts slowly.</p>
                     </div>
 
                     <div id="grp-enc" class="stale">
@@ -228,6 +228,15 @@
                             <div class="tile"><span class="lbl">X</span><span id="imu-x" class="data-val">0.0</span></div>
                             <div class="tile"><span class="lbl">Y</span><span id="imu-y" class="data-val">0.0</span></div>
                             <div class="tile"><span class="lbl">Z</span><span id="imu-z" class="data-val">0.0</span></div>
+                        </div>
+                    </div>
+
+                    <div id="grp-att" class="stale">
+                        <h3>Attitude</h3>
+                        <div class="tile-grid three">
+                            <div class="tile"><span class="lbl">Roll (°)</span><span id="imu-roll" class="data-val">0.0</span></div>
+                            <div class="tile"><span class="lbl">Pitch (°)</span><span id="imu-pitch" class="data-val">0.0</span></div>
+                            <div class="tile"><span class="lbl">|a| (m/s²)</span><span id="imu-amag" class="data-val">0.0</span></div>
                         </div>
                     </div>
 
@@ -301,7 +310,7 @@
         }
 
         function markTelemetryStale() {
-            setStale(['grp-heading', 'grp-enc', 'grp-accel', 'grp-color'], true);
+            setStale(['grp-heading', 'grp-enc', 'grp-accel', 'grp-color','grp-att'], true);
         }
 
         function attachTopics() {
@@ -326,6 +335,13 @@
                 var yawDeg = yaw * 180 / Math.PI;
                 document.getElementById('imu-yaw').innerText = yawDeg.toFixed(1);
                 document.getElementById('imu-gz').innerText = (m.angular_velocity.z * 180 / Math.PI).toFixed(2);
+                var roll  = Math.atan2(2 * (q.w * q.x + q.y * q.z), 1 - 2 * (q.x * q.x + q.y * q.y)) * 180 / Math.PI;
+                var pitch = Math.asin(Math.max(-1, Math.min(1, 2 * (q.w * q.y - q.z * q.x)))) * 180 / Math.PI;
+                var a = m.linear_acceleration;
+                document.getElementById('imu-roll').innerText = roll.toFixed(1);
+                document.getElementById('imu-pitch').innerText = pitch.toFixed(1);
+                document.getElementById('imu-amag').innerText = Math.sqrt(a.x*a.x + a.y*a.y + a.z*a.z).toFixed(2);
+                setStale(['grp-att'], false);
                 // Positive yaw is counter-clockwise; CSS rotate() is clockwise
                 document.getElementById('dial-arrow').style.transform = 'rotate(' + (-yawDeg) + 'deg)';
                 setStale(['grp-heading', 'grp-accel'], false);
@@ -345,7 +361,7 @@
                 setStale(['grp-color'], false);
             });
 
-            cmdVel = new ROSLIB.Topic({ ros: ros, name: '/cmd_vel_raw', messageType: 'geometry_msgs/msg/Twist' });
+            cmdVel = new ROSLIB.Topic({ ros: ros, name: '/cmd_vel_teleop', messageType: 'geometry_msgs/msg/Twist' });
             panTiltCmd = new ROSLIB.Topic({ ros: ros, name: '/pan_tilt_cmd', messageType: 'geometry_msgs/msg/Point' });
             dumpCmd = new ROSLIB.Topic({ ros: ros, name: '/dump_cmd', messageType: 'std_msgs/msg/Float32' });
             convCmd = new ROSLIB.Topic({ ros: ros, name: '/conveyor_cmd', messageType: 'std_msgs/msg/Float32' });

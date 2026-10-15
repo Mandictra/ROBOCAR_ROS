@@ -26,14 +26,27 @@
 
 #include "pins.h"
 #include "MPU6050_Custom.h"
+#include "attitude.h"
+#include "gains.h"   // per-wheel PI gains generated from tuned_gains.json (json_to_gains_h.py)
 
 using namespace BLA;
 
 // ---------- Robot Kinematics (Tune these in meters) ----------
 const float WHEEL_RADIUS = 0.0325f; // From Python file: 0.065m diameter
-const float TRACK_WIDTH = 0.20f;    
+const float TRACK_WIDTH = 0.20f;
 const float TICKS_PER_REV = 1000.0f; // Half-quad counts per wheel rev
 const float M_PER_TICK = (2.0f * PI * WHEEL_RADIUS) / TICKS_PER_REV;
+
+// ---------- Wheel speed PI ----------
+#define SPEED_LOOP_MS 50            // must equal the sample time the gains were tuned at (SAMPLE_DT = 0.05 s)
+const float MAX_WHEEL_RPM = 70.0f;  // wheel rpm at normalised speed 1.0 (tuning dashboard range was 0..70 rpm)
+
+// Wheel labels are from the robot's own perspective (standing behind it, looking the way it drives).
+// Sign that makes each wheel's encoder count positive when the robot rolls forward.
+// Encoder sign for odometry (counts positive when the wheel rolls forward). It must equal MOTOR_DIR_*: the encoders count
+// up when a motor is driven with positive raw PWM (that is what PID_TEST.cpp relies on), and forward is raw sign MOTOR_DIR_*.
+// Hard-coding it separately (it was -1,-1,+1,+1) disagreed with pins.h on the FRONT wheels.
+const int S_FL = MOTOR_DIR_FL, S_RL = MOTOR_DIR_RL, S_FR = MOTOR_DIR_FR, S_RR = MOTOR_DIR_RR;
 
 // ---------- EKF Matrices (4-State) ----------
 BLA::Matrix<4> X = {0.0f, 0.0f, 0.0f, 0.0f}; // State vector [x, y, theta, v]
@@ -49,23 +62,43 @@ BLA::Matrix<4, 4> Q = {0.001f, 0.0f,   0.0f,   0.0f,
 
 BLA::Matrix<4, 4> R = {0.05f, 0.0f,  0.0f,  0.0f,
                        0.0f,  0.05f, 0.0f,  0.0f,
-                       0.0f,  0.0f,  0.01f, 0.0f,
+                       0.0f,  0.0f,  0.1f,  0.0f,    // R(2,2) heading: 1.0 = gyro-only for now; set to 0.1f after encoder signs are verified
                        0.0f,  0.0f,  0.0f,  0.02f}; // Measurement Noise (Encoder trust)
 
 int32_t last_enc_l = 0;
 int32_t last_enc_r = 0;
 
 // ---------- Hardware Instances ----------
-Servo pan_servo, tilt_servo, dump_servo;
+Servo tilt_servo, dump_servo;
 ESP32Encoder enc_fl, enc_fr, enc_rl, enc_rr;
 AccelStepper conveyorStepper(AccelStepper::FULL4WIRE, CONV_IN1, CONV_IN3, CONV_IN2, CONV_IN4);
 Adafruit_TCS34725 tcs = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_50MS, TCS34725_GAIN_4X);
 MPU6050_Custom imuSensor;
+Attitude att;   // roll/pitch complementary filter + ramp flag (ROS FLU frame)
 
 #define SERVO_MIN_PULSE_US 500
 #define SERVO_MAX_PULSE_US 2400
 
 const int TCS_ADDR = 0x29;
+
+// Average ~2 s of still samples and calibrate the attitude filter.
+// Call after imuSensor.calibrateGyro() with the robot stationary on level ground.
+static void attitudeCalibrate() {
+  double a[3] = {0, 0, 0}, g[3] = {0, 0, 0};
+  int n = 0;
+  for (int i = 0; i < 100; i++) {
+    float v[6];
+    if (imuSensor.readData(v[0], v[1], v[2], v[3], v[4], v[5])) {
+      for (int j = 0; j < 3; j++) { a[j] += v[j]; g[j] += v[3 + j]; }
+      n++;
+    }
+    delay(20);
+  }
+  if (n < 50) return;
+  float af[3], gf[3];
+  for (int j = 0; j < 3; j++) { af[j] = a[j] / n; gf[j] = g[j] / n; }
+  att.calibrate(af, gf);
+}
 
 // ---------- micro-ROS Entities ----------
 rclc_support_t support;
@@ -107,8 +140,6 @@ static char imu_frame[] = "imu_link";
 volatile uint32_t last_cmd_ms = 0;
 float max_linear_vel = 0.5;
 float current_conveyor_cmd = 0.0;
-uint32_t last_dump_cmd_ms = 0;
-bool dump_servo_attached = true;
 
 bool color_active = false;
 bool imu_active = false;
@@ -118,14 +149,14 @@ float filtered_yaw = 0.0f;  // rad, EKF output
 uint32_t last_filter_us = 0;
 
 // ---------- Heading hold ----------
-#define HOLD_KP   1.5f     
-#define HOLD_KD   0.15f    
-#define HOLD_MAX  0.3f     
+#define HOLD_KP   1.5f
+#define HOLD_KD   0.15f
+#define HOLD_MAX  0.3f
 float cmd_lin = 0.0f, cmd_ang = 0.0f;
 float heading_target = 0.0f;
 float hold_corr = 0.0f;
 bool hold_active = false;
-bool hold_enabled = true;   
+bool hold_enabled = true;
 
 #define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){while(1){delay(100);}}}
 #define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){}}
@@ -149,13 +180,90 @@ void set_motor(int in1, int in2, float norm_speed) {
   }
 }
 
+// Raw signed PWM (-255..255) to one H-bridge. Same pin logic as set_motor().
+static void set_motor_pwm(int in1, int in2, int pwm_signed) {
+  int pwm = constrain(abs(pwm_signed), 0, 255);
+  if (pwm == 0) {
+    digitalWrite(in2, LOW); analogWrite(in1, 0);
+  } else if (pwm_signed > 0) {
+    digitalWrite(in2, LOW); analogWrite(in1, pwm);
+  } else {
+    digitalWrite(in2, HIGH); analogWrite(in1, 255 - pwm);
+  }
+}
+
+// One PI speed loop per wheel: u = F*r + sgn(r)*B + Kp*e + I,  I += Ki*dt*e   (gains from tuned_gains.json).
+// All speeds are in the robot-forward-positive domain; MOTOR_DIR_* is applied only at the PWM pins.
+struct WheelCtrl {
+  const MotorGains* g;
+  ESP32Encoder* enc;
+  int enc_sign;
+  float dir;            // MOTOR_DIR_* (+1/-1), may be int or float in pins.h
+  int in1, in2;
+  int32_t last_count;
+  float target_rpm, integ, meas_rpm;
+  int8_t last_sign;     // direction of the last target; integrator is cleared when it flips
+};
+
+WheelCtrl wheels[4] = {   // order: FL, RL, FR, RR
+  {&GAINS_FL, &enc_fl, S_FL, MOTOR_DIR_FL, FL_IN1, FL_IN2, 0, 0, 0, 0},
+  {&GAINS_RL, &enc_rl, S_RL, MOTOR_DIR_RL, RL_IN1, RL_IN2, 0, 0, 0, 0},
+  {&GAINS_FR, &enc_fr, S_FR, MOTOR_DIR_FR, FR_IN1, FR_IN2, 0, 0, 0, 0},
+  {&GAINS_RR, &enc_rr, S_RR, MOTOR_DIR_RR, RR_IN1, RR_IN2, 0, 0, 0, 0},
+};
+
+static void speed_ctrl_reset() {          // re-sync encoder baselines and clear integrators
+  for (auto &w : wheels) {
+    w.integ = 0.0f; w.meas_rpm = 0.0f; w.last_sign = 0;
+    w.last_count = (int32_t)w.enc->getCount();
+  }
+}
+
+static void speed_ctrl_stop() {           // immediate stop, zero targets
+  for (auto &w : wheels) {
+    w.target_rpm = 0.0f; w.integ = 0.0f;
+    set_motor_pwm(w.in1, w.in2, 0);
+  }
+}
+
+static void speed_ctrl_step(float dt) {
+  for (auto &w : wheels) {
+    int32_t c = (int32_t)w.enc->getCount();
+    // Encoder sign = MOTOR_DIR, exactly as in PID_TEST.cpp (where these gains were tuned): flipping a motor's
+    // polarity then flips its encoder reading too, so the feedback sign can never be wrong. (S_* is for odometry only.)
+    float rpm = (float)(w.dir * (c - w.last_count)) / TICKS_PER_REV * 60.0f / dt;
+    w.last_count = c;
+    w.meas_rpm = rpm;
+
+    float r = w.target_rpm;
+    if (fabsf(r) < 0.5f) { w.integ = 0.0f; set_motor_pwm(w.in1, w.in2, 0); continue; }
+
+    const Gain& g = (r > 0.0f) ? w.g->fwd : w.g->rev;     // separate gains per direction
+    int8_t sgn = (r > 0.0f) ? 1 : -1;
+    if (sgn != w.last_sign) { w.integ = 0.0f; w.last_sign = sgn; }
+
+    float e  = r - rpm;
+    float ff = g.ff * r + sgn * g.off;
+    float u_pre = ff + g.kp * e + w.integ;
+    bool saturated = fabsf(u_pre) >= MOTOR_MAX_PWM;
+    if (!(saturated && e * u_pre > 0.0f)) w.integ += g.ki * dt * e;   // anti-windup: no integration into saturation
+    w.integ = constrain(w.integ, -(float)MOTOR_MAX_PWM, (float)MOTOR_MAX_PWM);
+
+    float u = constrain(ff + g.kp * e + w.integ, -(float)MOTOR_MAX_PWM, (float)MOTOR_MAX_PWM);
+    if (u * r < 0.0f) u = 0.0f;           // never drive against the commanded direction
+    set_motor_pwm(w.in1, w.in2, (int)lroundf(u * w.dir));
+  }
+}
+
+// Left/right normalised speed (-1..1) -> wheel rpm targets (executed by speed_ctrl_step()).
 void drive_motors(float left_speed, float right_speed) {
   float left_norm  = constrain(left_speed,  -1.0f, 1.0f) * max_linear_vel;
   float right_norm = constrain(right_speed, -1.0f, 1.0f) * max_linear_vel;
-  set_motor(FL_IN1, FL_IN2, left_norm  * MOTOR_DIR_FL);
-  set_motor(RL_IN1, RL_IN2, left_norm  * MOTOR_DIR_RL);
-  set_motor(FR_IN1, FR_IN2, right_norm * MOTOR_DIR_FR);
-  set_motor(RR_IN1, RR_IN2, right_norm * MOTOR_DIR_RR);
+  wheels[0].target_rpm = left_norm  * MAX_WHEEL_RPM;   // FL
+  wheels[1].target_rpm = left_norm  * MAX_WHEEL_RPM;   // RL
+  wheels[2].target_rpm = right_norm * MAX_WHEEL_RPM;   // FR
+  wheels[3].target_rpm = right_norm * MAX_WHEEL_RPM;   // RR
+  if (fabsf(left_norm) < 0.01f && fabsf(right_norm) < 0.01f) speed_ctrl_stop();
 }
 
 // ---------- ROS 2 Callbacks ----------
@@ -180,18 +288,12 @@ void twist_callback(const void * msgin) {
 
 void pan_callback(const void * msgin) {
   const geometry_msgs__msg__Point * msg = (const geometry_msgs__msg__Point *)msgin;
-  pan_servo.write((int)constrain(msg->x, PAN_MIN, PAN_MAX));
   tilt_servo.write((int)constrain(msg->y, TILT_MIN, TILT_MAX));
 }
 
 void dump_callback(const void * msgin) {
   const std_msgs__msg__Float32 * msg = (const std_msgs__msg__Float32 *)msgin;
-  if (!dump_servo_attached) {
-    dump_servo.attach(DUMP_PIN, SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US);
-    dump_servo_attached = true;
-  }
-  dump_servo.write(constrain((int)msg->data, 5, 175));
-  last_dump_cmd_ms = millis();
+  dump_servo.write(constrain((int)msg->data, 15, 165));
 }
 
 void conveyor_callback(const void * msgin) {
@@ -214,7 +316,7 @@ void hold_callback(const void * msgin) {
 // ---------- I2C helpers ----------
 static bool tcs_read(uint16_t &r, uint16_t &g, uint16_t &b) {
   Wire.beginTransmission(TCS_ADDR);
-  Wire.write(0xB4);                    
+  Wire.write(0xB4);
   if (Wire.endTransmission(false) != 0) return false;
   if (Wire.requestFrom(TCS_ADDR, 8, true) != 8) return false;
   uint8_t d[8];
@@ -228,13 +330,13 @@ static bool tcs_read(uint16_t &r, uint16_t &g, uint16_t &b) {
 // ---------- Self-check ----------
 enum { SC_NOT_RUN = 0, SC_PASS = 1, SC_FAIL = 2, SC_UNVERIFIED = 3 };
 enum { SC_MPU, SC_TCS, SC_MOT_FL, SC_MOT_RL, SC_MOT_FR, SC_MOT_RR,
-       SC_PAN, SC_TILT, SC_DUMP, SC_STEPPER, SC_COUNT };
-#define SC_MIN_COUNTS  5      
-#define SC_TEST_SPEED  0.3f   
+       SC_TILT, SC_DUMP, SC_STEPPER, SC_COUNT };
+#define SC_MIN_COUNTS  5
+#define SC_TEST_SPEED  0.3f
 
 uint8_t sc_state[SC_COUNT] = {0};
 bool sc_toggle = false;
-bool sc_enabled = false;      
+bool sc_enabled = false;
 volatile bool run_selfcheck = false;
 rcl_publisher_t sc_pub;
 std_msgs__msg__Int32 sc_msg;
@@ -252,14 +354,14 @@ static void selfcheck_publish() {
 
 void selfcheck_callback(const void * msgin) {
   (void)msgin;
-  if (hold_active || fabsf(cmd_lin) > 0.01f || fabsf(cmd_ang) > 0.01f) return;  
+  if (hold_active || fabsf(cmd_lin) > 0.01f || fabsf(cmd_ang) > 0.01f) return;
   run_selfcheck = true;
 }
 
 static uint8_t check_tcs() {
   if (!color_active) return SC_FAIL;
   Wire.beginTransmission(TCS_ADDR);
-  Wire.write(0x92);                    
+  Wire.write(0x92);
   if (Wire.endTransmission(false) != 0) return SC_FAIL;
   if (Wire.requestFrom(TCS_ADDR, 1, true) != 1) return SC_FAIL;
   uint8_t id = Wire.read();
@@ -270,7 +372,7 @@ static uint8_t test_motor(int in1, int in2, ESP32Encoder &enc) {
   int64_t c0 = enc.getCount();
   set_motor(in1, in2, SC_TEST_SPEED);  delay(300);
   set_motor(in1, in2, 0.0f);           delay(150);
-  int64_t c1 = enc.getCount(); 
+  int64_t c1 = enc.getCount();
   set_motor(in1, in2, -SC_TEST_SPEED); delay(300);
   set_motor(in1, in2, 0.0f);           delay(150);
   int64_t c2 = enc.getCount();
@@ -279,7 +381,7 @@ static uint8_t test_motor(int in1, int in2, ESP32Encoder &enc) {
   int64_t af = f < 0 ? -f : f, ar = r < 0 ? -r : r;
   bool fok = af >= SC_MIN_COUNTS, rok = ar >= SC_MIN_COUNTS;
   bool dir = (f > 0) != (r > 0);
-  enc.setCount(f * 1000 + r);   // TEMP: encode both legs in the readout
+  enc.setCount(c0);   // TEMP: encode both legs in the readout
   if (fok && rok && dir) return SC_PASS;
   if (!fok)              return SC_FAIL;
   if (!rok)              return SC_UNVERIFIED;
@@ -287,23 +389,13 @@ static uint8_t test_motor(int in1, int in2, ESP32Encoder &enc) {
 }
 
 static void exercise_actuators() {
-  pan_servo.write((int)constrain(75, PAN_MIN, PAN_MAX));  delay(300);
-  pan_servo.write((int)constrain(105, PAN_MIN, PAN_MAX)); delay(300);
-  pan_servo.write(90);                                    delay(300);
-  sc_state[SC_PAN] = SC_UNVERIFIED;
-
   tilt_servo.write((int)constrain(75, TILT_MIN, TILT_MAX));  delay(300);
   tilt_servo.write((int)constrain(105, TILT_MIN, TILT_MAX)); delay(300);
   tilt_servo.write(90);                                      delay(300);
   sc_state[SC_TILT] = SC_UNVERIFIED;
 
-  if (!dump_servo_attached) {
-    dump_servo.attach(DUMP_PIN, SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US);
-    dump_servo_attached = true;
-  }
-  dump_servo.write(25); delay(500);     
-  dump_servo.write(5);  delay(500);
-  last_dump_cmd_ms = millis();
+  dump_servo.write(25); delay(500);
+  dump_servo.write(15); delay(500);
   sc_state[SC_DUMP] = SC_UNVERIFIED;
 
   conveyorStepper.enableOutputs();
@@ -328,12 +420,21 @@ static void selfcheck_run() {
   sc_state[SC_MOT_RR] = test_motor(RR_IN1, RR_IN2, enc_rr);
   exercise_actuators();
 
+  speed_ctrl_reset();   // self-check moved the wheels open loop (and rewrote encoder counts)
   last_filter_us = micros();
   sc_toggle = !sc_toggle;
   selfcheck_publish();
 }
 
 // ---------- micro-ROS connection management ----------
+// Serial link budget: odometry+imu+encoders+color at 20/20/20/10 Hz need about 24 kB/s. 115200 baud carries only
+// 11.5 kB/s, so the link saturates and a ping times out -> the session is dropped and re-created ("random restarts").
+// MICROROS_BAUD must equal the agent's --baudrate (agent: serial --dev /dev/ttyUSBx -b 921600).
+#define MICROROS_BAUD      460800
+#define IMU_ODOM_PUB_DIV   1      // publish imu+odom every N-th 50 ms cycle (1 = 20 Hz). Use >= 4 if you must stay at 115200.
+#define PING_PERIOD_MS     500    // agent liveness check interval
+#define PING_TIMEOUT_MS    200    // per-ping timeout
+#define PING_MAX_FAILS     4      // consecutive failed pings before the session is dropped (about 3 s)
 enum AgentState { WAITING_AGENT, AGENT_AVAILABLE, AGENT_CONNECTED, AGENT_DISCONNECTED };
 AgentState agent_state = WAITING_AGENT;
 bool hold_sub_ok = false;
@@ -349,7 +450,7 @@ static bool create_entities() {
   RC_OK(rclc_publisher_init_best_effort(&imu_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu), "imu_data"));
   RC_OK(rclc_publisher_init_best_effort(&odom_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry), "odometry/filtered"));
 
-  rmw_uros_sync_session(1000);         
+  rmw_uros_sync_session(1000);
 
   RC_OK(rclc_subscription_init_default(&twist_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist), "cmd_vel_raw"));
   RC_OK(rclc_subscription_init_default(&pan_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Point), "pan_tilt_cmd"));
@@ -397,21 +498,19 @@ static void destroy_entities() {
 
   sc_enabled = false;
   hold_sub_ok = false;
-  hold_enabled = true;   
+  hold_enabled = true;
 }
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(MICROROS_BAUD);
   set_microros_serial_transports(Serial);
   analogWriteFrequency(20000);
 
   ESP32PWM::allocateTimer(0); ESP32PWM::allocateTimer(1); ESP32PWM::allocateTimer(2);
-  pan_servo.setPeriodHertz(50); tilt_servo.setPeriodHertz(50); dump_servo.setPeriodHertz(50);
-  pan_servo.attach(PAN_PIN, SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US);
+  tilt_servo.setPeriodHertz(50); dump_servo.setPeriodHertz(50);
   tilt_servo.attach(TILT_PIN, SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US);
   dump_servo.attach(DUMP_PIN, SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US);
-  pan_servo.write(90); tilt_servo.write(90); dump_servo.write(5);
-  last_dump_cmd_ms = millis();
+  tilt_servo.write(90); dump_servo.write(15);
 
   pinMode(FL_IN1, OUTPUT); pinMode(FL_IN2, OUTPUT);
   pinMode(FR_IN1, OUTPUT); pinMode(FR_IN2, OUTPUT);
@@ -430,7 +529,8 @@ void setup() {
 
   if (imuSensor.begin()) {
     imu_active = true;
-    imuSensor.calibrateGyro();
+    imuSensor.calibrateGyro();   // robot must be still (~1.2 s)
+    attitudeCalibrate();         // robot must be still and level (~2 s)
     last_filter_us = micros();
   }
 
@@ -438,8 +538,8 @@ void setup() {
   imu_msg.header.frame_id.size = strlen(imu_frame);
   imu_msg.header.frame_id.capacity = sizeof(imu_frame);
 
-  imu_msg.orientation_covariance[0] = 1e3;   
-  imu_msg.orientation_covariance[4] = 1e3;   
+  imu_msg.orientation_covariance[0] = 0.01;   // roll: from attitude filter
+  imu_msg.orientation_covariance[4] = 0.01;   // pitch: from attitude filter
   imu_msg.orientation_covariance[8] = 0.1;
   imu_msg.angular_velocity_covariance[0] = 0.001;
   imu_msg.angular_velocity_covariance[4] = 0.001;
@@ -456,13 +556,14 @@ void setup() {
   odom_msg.child_frame_id.size = strlen(base_link_frame);
   odom_msg.child_frame_id.capacity = sizeof(base_link_frame);
 
-  agent_state = WAITING_AGENT;   
+  agent_state = WAITING_AGENT;
 }
 
 void loop() {
   uint32_t current_time = millis();
 
   static uint32_t last_agent_check = 0;
+  static uint8_t ping_fail = 0;
   switch (agent_state) {
     case WAITING_AGENT:
       if (current_time - last_agent_check >= 500) {
@@ -472,6 +573,8 @@ void loop() {
       break;
     case AGENT_AVAILABLE:
       if (create_entities()) {
+        ping_fail = 0;
+        last_agent_check = millis();
         agent_state = AGENT_CONNECTED;
       } else {
         destroy_entities();
@@ -479,9 +582,14 @@ void loop() {
       }
       break;
     case AGENT_CONNECTED:
-      if (current_time - last_agent_check >= 200) {
+      if (current_time - last_agent_check >= PING_PERIOD_MS) {
         last_agent_check = current_time;
-        if (rmw_uros_ping_agent(100, 1) != RMW_RET_OK) agent_state = AGENT_DISCONNECTED;
+        if (rmw_uros_ping_agent(PING_TIMEOUT_MS, 1) == RMW_RET_OK) {
+          ping_fail = 0;
+        } else if (++ping_fail >= PING_MAX_FAILS) {          // tolerate a few missed pings on a busy link
+          ping_fail = 0;
+          agent_state = AGENT_DISCONNECTED;
+        }
       }
       if (agent_state == AGENT_CONNECTED) {
         RCSOFTCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(0)));
@@ -495,21 +603,23 @@ void loop() {
   const bool connected = (agent_state == AGENT_CONNECTED);
   current_time = millis();
 
-  if (run_selfcheck) {               
+  if (run_selfcheck) {
     run_selfcheck = false;
     selfcheck_run();
     current_time = millis();
   }
-  static uint32_t last_sc_pub = 0;
-  if (connected && sc_enabled && current_time - last_sc_pub >= 1000) {   
-    last_sc_pub = current_time;
-    selfcheck_publish();
+  static uint32_t last_speed_ms = 0;
+  if (current_time - last_speed_ms >= SPEED_LOOP_MS) {
+    float dt = (current_time - last_speed_ms) * 1e-3f;
+    last_speed_ms = current_time;
+    if (dt > 0.25f) speed_ctrl_reset();   // first tick after a long block (self-check): just re-sync
+    else            speed_ctrl_step(dt);
   }
 
-  if (dump_servo_attached && (current_time - last_dump_cmd_ms > 1000)) {
-    dump_servo.detach();
-    pinMode(DUMP_PIN, OUTPUT); digitalWrite(DUMP_PIN, LOW);
-    dump_servo_attached = false;
+  static uint32_t last_sc_pub = 0;
+  if (connected && sc_enabled && current_time - last_sc_pub >= 1000) {
+    last_sc_pub = current_time;
+    selfcheck_publish();
   }
 
   if (abs(current_conveyor_cmd) > 0.1) {
@@ -534,19 +644,21 @@ void loop() {
   static uint32_t last_imu_pub = 0;
   if (current_time - last_imu_pub >= 50) {
     last_imu_pub = current_time;
-    
+
     float ax, ay, az, gx, gy, gz;
     if (imu_active && imuSensor.readData(ax, ay, az, gx, gy, gz)) {
-      
-      // Add this line to flip the upside-down sensor
-      gz = -gz; 
-      
+      // Sensor frame is standard FLU (x fwd, y left, z up): no axis flips.
+
       uint32_t now_us = micros();
       float dt = (now_us - last_filter_us) * 1e-6f;
       last_filter_us = now_us;
 
       if (dt > 0.0f && dt < 0.5f) {
-        
+
+        // Roll/pitch filter + ramp flag. Runs on the driver-corrected gz,
+        // before ZUPT/deadband modify it.
+        att.update(ax, ay, az, gx, gy, gz, dt);
+
         // --- Zero Velocity Update ---
         static uint32_t still_since = 0;
         bool still = fabsf(cmd_lin) < 0.01f && fabsf(cmd_ang) < 0.01f;
@@ -554,19 +666,19 @@ void loop() {
           if (still_since == 0) still_since = current_time;
           if (current_time - still_since > 1000 && fabsf(gz) < 0.05f) {
             float current_bias = imuSensor.getGyroBiasZ();
-            imuSensor.updateGyroBiasZ(current_bias - (0.02f * gz));   // gz is already sign-flipped; bias is subtracted from the UNFLIPPED reading
+            imuSensor.updateGyroBiasZ(current_bias + (0.02f * gz));
             gz -= (0.02f * gz); // Apply instantly to this tick
           }
         } else {
           still_since = 0;
         }
 
-        if (fabsf(gz) < 0.005f) gz = 0.0f;   
+        if (fabsf(gz) < 0.005f) gz = 0.0f;
 
         // --- EKF Update Process (4-State) ---
-        int32_t enc_l = (enc_fl.getCount() + enc_rl.getCount()) / 2;
-        int32_t enc_r = (-enc_fr.getCount() + -enc_rr.getCount()) / 2;
-        
+        int32_t enc_l = (S_FL * enc_fl.getCount() + S_RL * enc_rl.getCount()) / 2;
+        int32_t enc_r = (S_FR * enc_fr.getCount() + S_RR * enc_rr.getCount()) / 2;
+
         float d_left = (enc_l - last_enc_l) * M_PER_TICK;
         float d_right = (enc_r - last_enc_r) * M_PER_TICK;
         last_enc_l = enc_l;
@@ -576,8 +688,8 @@ void loop() {
         float v_enc = d_center / dt;
         float d_theta_enc = (d_right - d_left) / TRACK_WIDTH;
 
-        // Convert IMU G's to m/s^2 (Assuming X-axis points forward)
-        float accel_forward = ax * 9.81f; 
+        // Gravity-compensated forward accel in m/s^2 (gain-corrected, pitch-compensated)
+        float accel_forward = att.forwardAccel();
 
         // 1. Prediction Step
         float v_pred = X(3) + (accel_forward * dt);
@@ -585,7 +697,7 @@ void loop() {
 
         // ZUPT: Kill accelerometer drift when commanded to stop
         if (still) {
-            v_pred = 0.0f; 
+            v_pred = 0.0f;
         }
 
         X(0) += v_pred * cosf(theta_pred) * dt;
@@ -616,16 +728,21 @@ void loop() {
         while (Y(2) > PI)  Y(2) -= 2.0f * PI;
         while (Y(2) < -PI) Y(2) += 2.0f * PI;
 
-        BLA::Matrix<4, 4> S = H * P * ~H + R;
+        // Consistency gate: skid-steer encoders can under-read yaw but cannot honestly over-read it.
+        // If the encoder heading change exceeds what the gyro allows, the wheels are slipping or off the
+        // ground (e.g. on a test rig), so ignore the encoder heading for this tick.
+        BLA::Matrix<4, 4> Rk = R;
+        if (fabsf(d_theta_enc) > 1.2f * fabsf(gz * dt) + 0.002f) Rk(2, 2) = 1e3f;
+        BLA::Matrix<4, 4> S = H * P * ~H + Rk;
         BLA::Matrix<4, 4> K = P * ~H * Inverse(S);
 
         X += K * Y;
         while (X(2) > PI)  X(2) -= 2.0f * PI;
         while (X(2) < -PI) X(2) += 2.0f * PI;
 
-        BLA::Matrix<4, 4> I = {1.0f,0.0f,0.0f,0.0f, 
-                               0.0f,1.0f,0.0f,0.0f, 
-                               0.0f,0.0f,1.0f,0.0f, 
+        BLA::Matrix<4, 4> I = {1.0f,0.0f,0.0f,0.0f,
+                               0.0f,1.0f,0.0f,0.0f,
+                               0.0f,0.0f,1.0f,0.0f,
                                0.0f,0.0f,0.0f,1.0f};
         P = (I - K * H) * P;
 
@@ -645,31 +762,40 @@ void loop() {
         imu_msg.header.stamp.sec = (int32_t)(t_ns / 1000000000LL);
         imu_msg.header.stamp.nanosec = (uint32_t)(t_ns % 1000000000LL);
 
-        imu_msg.linear_acceleration.x = ax;
-        imu_msg.linear_acceleration.y = ay;
-        imu_msg.linear_acceleration.z = az;
-        imu_msg.angular_velocity.x = gx;
-        imu_msg.angular_velocity.y = gy;
+        imu_msg.linear_acceleration.x = ax * att.gainK();
+        imu_msg.linear_acceleration.y = ay * att.gainK();
+        imu_msg.linear_acceleration.z = az * att.gainK();
+        imu_msg.angular_velocity.x = gx - att.gyroBias(0);
+        imu_msg.angular_velocity.y = gy - att.gyroBias(1);
         imu_msg.angular_velocity.z = gz;
-        imu_msg.orientation.w = cosf(filtered_yaw * 0.5f);
-        imu_msg.orientation.x = 0.0;
-        imu_msg.orientation.y = 0.0;
-        imu_msg.orientation.z = sinf(filtered_yaw * 0.5f);
+
+        // Orientation: roll/pitch from attitude filter, yaw from EKF (ZYX Euler -> quaternion)
+        float cr = cosf(att.roll * 0.5f),  sr = sinf(att.roll * 0.5f);
+        float cp = cosf(att.pitch * 0.5f), sp = sinf(att.pitch * 0.5f);
+        float cy = cosf(filtered_yaw * 0.5f), sy = sinf(filtered_yaw * 0.5f);
+        imu_msg.orientation.w = cr*cp*cy + sr*sp*sy;
+        imu_msg.orientation.x = sr*cp*cy - cr*sp*sy;
+        imu_msg.orientation.y = cr*sp*cy + sr*cp*sy;
+        imu_msg.orientation.z = cr*cp*sy - sr*sp*cy;
 
         // --- Publish Odometry ---
         odom_msg.header.stamp.sec = imu_msg.header.stamp.sec;
         odom_msg.header.stamp.nanosec = imu_msg.header.stamp.nanosec;
-        
+
         odom_msg.pose.pose.position.x = X(0);
         odom_msg.pose.pose.position.y = X(1);
         odom_msg.pose.pose.position.z = 0.0;
-        
-        odom_msg.pose.pose.orientation = imu_msg.orientation; 
-        
+
+        // Yaw-only orientation for the 2D odometry
+        odom_msg.pose.pose.orientation.x = 0.0;
+        odom_msg.pose.pose.orientation.y = 0.0;
+        odom_msg.pose.pose.orientation.z = sy;
+        odom_msg.pose.pose.orientation.w = cy;
+
         // Broadcast the fused EKF velocity instead of raw encoder velocity
-        odom_msg.twist.twist.linear.x = X(3); 
+        odom_msg.twist.twist.linear.x = X(3);
         odom_msg.twist.twist.linear.y = 0.0;
-        odom_msg.twist.twist.angular.z = gz; 
+        odom_msg.twist.twist.angular.z = gz;
 
         // Pose covariance (row-major 6x6: x=0, y=7, yaw=35). Unobserved axes get a large value.
         for (int i = 0; i < 36; i++) { odom_msg.pose.covariance[i] = 0.0; odom_msg.twist.covariance[i] = 0.0; }
@@ -681,9 +807,11 @@ void loop() {
         odom_msg.twist.covariance[35] = 0.05;    // wz, PLACEHOLDER
         odom_msg.twist.covariance[7]  = odom_msg.twist.covariance[14] = odom_msg.twist.covariance[21] = odom_msg.twist.covariance[28] = 1e6;
 
-        if (connected) { 
-            RCSOFTCHECK(rcl_publish(&imu_pub, &imu_msg, NULL)); 
-            RCSOFTCHECK(rcl_publish(&odom_pub, &odom_msg, NULL)); 
+        static uint8_t pub_cnt = 0;
+        if (connected && (++pub_cnt >= IMU_ODOM_PUB_DIV)) {
+            pub_cnt = 0;
+            RCSOFTCHECK(rcl_publish(&imu_pub, &imu_msg, NULL));
+            RCSOFTCHECK(rcl_publish(&odom_pub, &odom_msg, NULL));
         }
       }
     }
@@ -696,7 +824,7 @@ void loop() {
     uint16_t r, g, b;
     if (tcs_read(r, g, b)) {
       if (!color_primed) {
-        color_primed = true;             
+        color_primed = true;
       } else {
         color_msg.x = r; color_msg.y = g; color_msg.z = b;
         RCSOFTCHECK(rcl_publish(&color_pub, &color_msg, NULL));
