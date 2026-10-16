@@ -4,15 +4,16 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <meta name="color-scheme" content="dark">
-    <title>Autonomous Sorter Dashboard</title>
+    <title>Tetsuzakura Knights | Autonomous Sorter</title>
     <script src="https://cdn.jsdelivr.net/npm/eventemitter2@6.4.9/lib/eventemitter2.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/roslib@1/build/roslib.min.js"></script>
     <style>
         :root {
-            --bg: #0d1422; --panel: #151e31; --inset: #0d1422; --line: #27334d; --btn: #223049; --btn-hover: #2c3d5d;
-            --text: #e8edf6; --muted: #8c99b3; --accent: #38bdf8;
-            --ok: #34d399; --bad: #f87171; --warn: #fbbf24; --estop: #dc2626;
+            --bg: #130f17; --panel: #1c1621; --inset: #120e16; --line: #3b2f42; --btn: #2a2132; --btn-hover: #3a2d45;
+            --text: #f7ebf0; --muted: #a58f9f; --accent: #f4a6c0; --accent-deep: #e0668f;
+            --ok: #8fd5a6; --bad: #ff7a6b; --warn: #f5c76b; --estop: #dc2626;
             --font: "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+            --font-display: "Yu Mincho", "Hiragino Mincho ProN", "Noto Serif JP", "Noto Serif CJK JP", Georgia, "Times New Roman", serif;
         }
         * { box-sizing: border-box; }
         html { -webkit-text-size-adjust: 100%; }
@@ -29,8 +30,11 @@
         h1 { font-size: 1.15rem; font-weight: 650; letter-spacing: 0.2px; }
         #status { display: inline-flex; align-items: center; gap: 8px; padding: 4px 12px; border-radius: 999px; font-size: 0.85rem; border: 1px solid var(--line); color: var(--muted); }
         #status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
-        #status.connected { color: var(--ok); border-color: rgba(52, 211, 153, 0.45); }
-        #status.disconnected { color: var(--bad); border-color: rgba(248, 113, 113, 0.45); }
+        #status.connected { color: var(--ok); border-color: rgba(143, 213, 166, 0.45); }
+        #status.disconnected { color: var(--bad); border-color: rgba(255, 122, 107, 0.45); }
+        #pad-status { display: inline-flex; align-items: center; gap: 8px; padding: 4px 12px; border-radius: 999px; font-size: 0.85rem; border: 1px solid var(--line); color: var(--muted); }
+        #pad-status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+        #pad-status.on { color: var(--ok); border-color: rgba(143, 213, 166, 0.45); }
         .estop { flex: none; min-width: 108px; min-height: 48px; padding: 0 20px; border: 2px solid #fca5a5; border-radius: 10px; background: var(--estop); color: #fff; font-weight: 800; letter-spacing: 1px; cursor: pointer; }
         .estop:hover { background: #b91c1c; }
         .estop:active { transform: scale(0.97); }
@@ -68,15 +72,15 @@
         .btn:hover { background: var(--btn-hover); }
         .btn:active { transform: scale(0.97); }
         .btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
-        .btn-primary { background: var(--accent); color: #04121c; }
-        .btn-primary:hover { background: #0ea5e9; }
-        .btn-stop { background: rgba(248, 113, 113, 0.14); border-color: rgba(248, 113, 113, 0.55); color: #fecaca; }
-        .btn-stop:hover { background: rgba(248, 113, 113, 0.26); }
+        .btn-primary { background: var(--accent); color: #2b0e1b; }
+        .btn-primary:hover { background: var(--accent-deep); }
+        .btn-stop { background: rgba(255, 122, 107, 0.14); border-color: rgba(255, 122, 107, 0.55); color: #fecaca; }
+        .btn-stop:hover { background: rgba(255, 122, 107, 0.26); }
 
         /* ---------- Drive pad ---------- */
         .d-pad { --k: clamp(68px, 21vw, 88px); display: grid; grid-template-columns: repeat(3, var(--k)); grid-template-rows: repeat(3, var(--k)); gap: 10px; justify-content: center; margin-top: 4px; }
         .d-btn { border: 1px solid var(--line); background: var(--btn); color: var(--text); border-radius: 12px; font-size: 1.5rem; cursor: pointer; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; touch-action: none; transition: background 0.1s; }
-        .d-btn.active { background: var(--accent); border-color: var(--accent); color: #04121c; transform: scale(0.96); }
+        .d-btn.active { background: var(--accent); border-color: var(--accent); color: #2b0e1b; transform: scale(0.96); }
         .d-up { grid-column: 2; grid-row: 1; }
         .d-left { grid-column: 1; grid-row: 2; }
         .d-stop { grid-column: 2; grid-row: 2; font-size: 0.95rem; font-weight: 700; background: var(--panel); }
@@ -92,7 +96,7 @@
         .tile { background: var(--inset); border-radius: 8px; padding: 8px 12px; }
         .tile .lbl { display: block; font-size: 0.78rem; color: var(--muted); }
         .data-val { display: block; font-size: 1.3rem; font-weight: 650; color: var(--accent); }
-        .stale .data-val { color: #55627d; }
+        .stale .data-val { color: #6e5b6b; }
         .stale .dial-arrow { opacity: 0.3; }
 
         .heading { display: flex; align-items: center; gap: 16px; }
@@ -119,13 +123,48 @@
         .sc-tag b { display: inline-block; width: 1em; text-align: center; }
         .sc-none { color: var(--muted); } .sc-pass { color: var(--ok); } .sc-fail { color: var(--bad); } .sc-warn { color: var(--warn); } .sc-run { color: var(--accent); }
         #sc-summary { margin-top: 12px; color: var(--muted); font-size: 0.85rem; }
-        .sc-msg { padding: 12px; border-radius: 8px; background: var(--inset); border: 1px solid rgba(248, 113, 113, 0.45); color: #fecaca; font-size: 0.9rem; }
+        .sc-msg { padding: 12px; border-radius: 8px; background: var(--inset); border: 1px solid rgba(255, 122, 107, 0.45); color: #fecaca; font-size: 0.9rem; }
 
         @media (max-width: 420px) {
             h1 { font-size: 1.02rem; }
             .estop { min-width: 92px; padding: 0 14px; }
             .panel { padding: 14px; }
         }
+
+        /* ---------- Tetsuzakura Knights theme: forged iron + sakura ---------- */
+        body { background: radial-gradient(ellipse 60% 45% at 100% 0%, rgba(244,166,192,0.10), transparent 70%), var(--bg); min-height: 100vh; }
+        body::after { content: ""; position: fixed; right: -90px; bottom: -90px; width: 420px; height: 420px; pointer-events: none; z-index: 0; opacity: 0.045;
+                      background: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='-24 -24 48 48'%3E%3Cg fill='%23f4a6c0'%3E%3Cpath id='p' d='M0 0C-11-6-12-20-3.5-21L0-17L3.5-21C12-20 11-6 0 0Z'/%3E%3Cuse href='%23p' transform='rotate(72)'/%3E%3Cuse href='%23p' transform='rotate(144)'/%3E%3Cuse href='%23p' transform='rotate(216)'/%3E%3Cuse href='%23p' transform='rotate(288)'/%3E%3C/g%3E%3C/svg%3E") center / contain no-repeat; }
+        .topbar, .page { position: relative; z-index: 1; }
+        .topbar { position: sticky; background: rgba(19,15,23,0.94); border-bottom: 0; }
+        .topbar::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px;
+                         background: linear-gradient(90deg, #4a3d52 0%, #4a3d52 35%, var(--accent) 50%, #4a3d52 65%, #4a3d52 100%); }
+        .brand { gap: 14px 18px; }
+        .brand > .mon { flex: none; width: 40px; height: 40px; filter: drop-shadow(0 0 8px rgba(244,166,192,0.35)); }
+        .name { display: flex; flex-direction: column; min-width: 0; }
+        h1 { font-family: var(--font-display); font-size: 1.3rem; font-weight: 700; letter-spacing: 0.5px; color: #fbd3e1; line-height: 1.15; }
+        .sub { font-size: 0.78rem; color: var(--muted); }
+        .sub [lang=ja] { font-family: var(--font-display); color: var(--accent); margin-right: 4px; }
+
+        .panel { background: linear-gradient(180deg, #211a27, var(--panel) 38%); border-color: var(--line); border-radius: 6px; border-top: 2px solid #5a4863; box-shadow: inset 0 1px 0 rgba(255,255,255,0.03); }
+        .panel > h2, .sc-head h2 { font-family: var(--font-display); font-size: 1.08rem; font-weight: 700; color: #fbd3e1; }
+        .btn, .d-btn { border-radius: 6px; border-color: #3b2f42; }
+        .btn-primary { background: linear-gradient(180deg, #f8b9ce, var(--accent)); border-color: #fbd3e1; }
+        .btn-primary:hover { background: linear-gradient(180deg, var(--accent), var(--accent-deep)); }
+        .d-btn { background: linear-gradient(180deg, #33283b, var(--btn)); }
+        .d-btn.active { background: var(--accent); border-color: #fbd3e1; box-shadow: 0 0 14px rgba(244,166,192,0.45); }
+        .d-stop { background: var(--panel); }
+        .estop { border-radius: 6px; border-color: #ffb4b4; }
+        .tile { border: 1px solid #2b2132; border-radius: 6px; }
+        input[type=range]::-webkit-slider-runnable-track { background: linear-gradient(90deg, #4a3d52, #6a5473); }
+        input[type=range]::-moz-range-track { background: linear-gradient(90deg, #4a3d52, #6a5473); }
+        input[type=range]::-webkit-slider-thumb { box-shadow: 0 0 0 1px var(--accent), 0 0 8px rgba(244,166,192,0.5); }
+        input[type=range]::-moz-range-thumb { box-shadow: 0 0 0 1px var(--accent), 0 0 8px rgba(244,166,192,0.5); }
+        .dial { border-color: #5a4863; background: radial-gradient(circle, #1b1520 0%, var(--inset) 70%); box-shadow: inset 0 0 0 6px #17111b, inset 0 0 0 7px #3b2f42; }
+        #color-swatch { border-color: #5a4863; }
+        .sc-row { border: 1px solid #2b2132; border-radius: 6px; }
+        code { color: var(--accent); }
+        @media (max-width: 420px) { h1 { font-size: 1.08rem; } .brand > .mon { width: 32px; height: 32px; } }
         @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
     </style>
 </head>
@@ -134,10 +173,18 @@
     <header class="topbar">
         <div class="topbar-inner">
             <div class="brand">
-                <h1>Autonomous Sorter</h1>
+                <svg class="mon" viewBox="-24 -24 48 48" aria-hidden="true">
+                    <defs><radialGradient id="monGrad" cx="0" cy="0" r="22" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#e0668f"/><stop offset="1" stop-color="#fbd3e1"/></radialGradient></defs>
+                    <g fill="url(#monGrad)" stroke="#f4a6c0" stroke-width=".6" stroke-linejoin="round">
+                        <path id="pt" d="M0 0C-11-6-12-20-3.5-21L0-17L3.5-21C12-20 11-6 0 0Z"/>
+                        <use href="#pt" transform="rotate(72)"/><use href="#pt" transform="rotate(144)"/><use href="#pt" transform="rotate(216)"/><use href="#pt" transform="rotate(288)"/>
+                    </g>
+                    <circle r="2.2" fill="#8f2b52"/>
+                </svg>
+                <div class="name"><h1>Tetsuzakura Knights</h1><span class="sub"><span lang="ja">鉄桜</span> Autonomous Sorter</span></div>
                 <div id="status" class="disconnected">Connecting to ROSBridge…</div>
+                <div id="pad-status" title="Xbox controller">No controller</div>
             </div>
-            <button class="estop" onclick="emergencyStop()" title="Stops the drive motors and the conveyor">E-STOP</button>
         </div>
     </header>
 
@@ -148,7 +195,7 @@
                 <h2 id="h-drive">Drive</h2>
                 <div class="field">
                     <div class="field-head"><span>Speed limit</span><span class="val" id="speed-val">0.5 m/s</span></div>
-                    <input type="range" min="0.1" max="1.0" step="0.1" value="0.5" onchange="updateMaxSpeed(this.value)" aria-label="Speed limit">
+                    <input type="range" id="speed-slider" min="0.1" max="1.0" step="0.1" value="0.5" onchange="updateMaxSpeed(this.value)" aria-label="Speed limit">
                 </div>
                 <div class="field">
                     <div class="d-pad">
@@ -158,7 +205,8 @@
                         <button class="d-btn d-right" data-lin="0" data-ang="-1" aria-label="Turn right">&#9654;</button>
                         <button class="d-btn d-down" data-lin="-1" data-ang="0" aria-label="Reverse">&#9660;</button>
                     </div>
-                    <p class="hint pad-hint">Hold a button to drive. Releasing it stops the robot. Laptop: W/↑ forward, S/↓ reverse, A/← left, D/→ right, Space stops.</p>
+                    <p class="hint pad-hint">Hold a button to drive. Releasing it stops the robot. Laptop: W/↑ forward, S/↓ reverse, A/← left, D/→ right, Space stops.<br>Xbox controller: left stick drives, right stick pans/tilts the camera, RT/LT run the conveyor, RB/LB change the speed limit, A dump, X reset bin, Y center camera. Rebind in <code>GP_MAP</code> in the script.</p>
+                    <p class="hint pad-hint" id="pad-last">Press a controller button to see its index here.</p>
                 </div>
             </section>
 
@@ -201,7 +249,7 @@
                         <div class="heading">
                             <div class="dial" aria-hidden="true">
                                 <div class="dial-arrow" id="dial-arrow">
-                                    <svg viewBox="0 0 40 40"><path d="M20 4 L31 33 L20 27 L9 33 Z" fill="#38bdf8"/></svg>
+                                    <svg viewBox="0 0 40 40"><defs><linearGradient id="petalGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fbd3e1"/><stop offset="1" stop-color="#e0668f"/></linearGradient></defs><path d="M20 4 L31 33 L20 27 L9 33 Z" fill="url(#petalGrad)"/></svg>
                                 </div>
                             </div>
                             <div class="heading-vals">
@@ -276,8 +324,9 @@
         var reconnectDelayMs = 1000;
         var cmdVel, panTiltCmd, dumpCmd, convCmd, speedCmd, scCmd;
 
-        // Use whichever machine served this page; fall back to the laptop IP when opened as a file
-        var HOST = location.hostname || '192.168.100.3';
+        // rosbridge host: ?host=<ip> overrides, otherwise whichever machine served this page.
+        // Opened straight from disk (file://) there is no hostname, so pass ?host=<pi-ip> (falls back to localhost).
+        var HOST = new URLSearchParams(location.search).get('host') || location.hostname || 'localhost';
 
         function setStatus(text, ok) {
             statusEl.innerText = text;
@@ -445,15 +494,21 @@
             }, 20000);
         }
 
+        // cmd_vel is in real units (m/s, rad/s). The speed slider scales these here; the firmware no longer has a speed limit.
+        var VMAX = 0.238;   // m/s at slider 1.0 (70 rpm wheel limit)
+        var WMAX = 1.6;     // rad/s at slider 1.0, pure spin (depends on TRACK_CMD in main.cpp)
+
         function updateMaxSpeed(val) {
-            document.getElementById('speed-val').innerText = val + " m/s";
-            if (!speedCmd) return;
-            speedCmd.publish(new ROSLIB.Message({ data: parseFloat(val) }));
+            document.getElementById('speed-val').innerText = (parseFloat(val) * VMAX).toFixed(2) + " m/s";
         }
 
         function drive(lin, ang) {
             if (!cmdVel) return;
-            cmdVel.publish(new ROSLIB.Message({ linear: { x: lin, y: 0, z: 0 }, angular: { x: 0, y: 0, z: ang } }));
+            var s = parseFloat(document.getElementById('speed-slider').value);
+            cmdVel.publish(new ROSLIB.Message({
+                linear:  { x: lin * VMAX * s, y: 0, z: 0 },
+                angular: { x: 1, y: 0, z: ang * WMAX * s }   // angular.x = 1 asks the firmware for heading hold
+            }));
         }
 
         function updatePanTilt() {
@@ -487,11 +542,6 @@
         function setStepper(speed) {
             document.getElementById('stepper-slider').value = speed;
             updateStepper();
-        }
-
-        function emergencyStop() {
-            drive(0, 0);
-            setStepper(0);
         }
 
         document.querySelectorAll('.d-pad .d-btn:not(.d-stop)').forEach(function (btn) {
@@ -650,6 +700,192 @@
 
         window.addEventListener('blur', stopAllDriveInput);
 
+
+        // ---------- Xbox controller (Gamepad API, standard mapping) ----------
+        // Standard-mapping indices. Buttons: 0 A, 1 B, 2 X, 3 Y, 4 LB, 5 RB, 6 LT, 7 RT, 8 View, 9 Menu,
+        //   10 L3, 11 R3, 12 D-up, 13 D-down, 14 D-left, 15 D-right, 16 Guide.   Axes: 0 LX, 1 LY, 2 RX, 3 RY.
+        // To rebind, edit GP_MAP. Set an axis or trigger to null to disable it. The line under the drive pad
+        // shows the index of whatever you press, so you can find the number for any button.
+        var GP_MAP = {
+            axes:     { driveFwd: 1, driveTurn: 0, camPan: 2, camTilt: 3 },
+            triggers: { convFwd: 7, convRev: 6 },
+            buttons:  { 0: 'dump', 2: 'resetBin', 3: 'centerCam', 5: 'speedUp', 4: 'speedDown' }
+            // actions: dump, resetBin, centerCam, speedUp, speedDown, stop
+        };
+        var GP = {
+            DEADZONE: 0.12,
+            PAN_RATE: 90,        // deg/s at full deflection
+            TILT_RATE: 90,
+            PAN_DIR: 1,          // flip sign if the camera moves the wrong way
+            TILT_DIR: -1,        // stick up (axis < 0) increases tilt
+            CONV_MAX: 700,
+            CONV_STEP: 50,
+            TICK_MS: 50
+        };
+        var gpIndex = null;
+        var gpDriving = false;
+        var gpLastConv = 0;
+        var gpConvActive = false;
+        var gpPrevBtn = [];
+        var gpAxisHot = [];
+        var gpPan = 90, gpTilt = 90, gpCamMoving = false;
+        var gpLastT = performance.now();
+        var padStatusEl = document.getElementById('pad-status');
+        var padLastEl = document.getElementById('pad-last');
+
+        function gpStepSpeed(d) {
+            var sl = document.getElementById('speed-slider');
+            var v = Math.min(1.0, Math.max(0.1, Math.round((parseFloat(sl.value) + d) * 10) / 10));
+            sl.value = v;
+            updateMaxSpeed(v.toFixed(1));
+        }
+
+        var GP_ACTIONS = {
+            dump:      function () { setDump(175); },
+            resetBin:  function () { setDump(5); },
+            centerCam: function () { centerCamera(); },
+            speedUp:   function () { gpStepSpeed(0.1); },
+            speedDown: function () { gpStepSpeed(-0.1); },
+            stop:      function () { gpReleaseAll(); drive(0, 0); setStepper(0); }
+        };
+
+        function gpDz(v) {
+            var a = Math.abs(v);
+            if (a < GP.DEADZONE) return 0;
+            var n = (a - GP.DEADZONE) / (1 - GP.DEADZONE);
+            return (v < 0 ? -1 : 1) * n * n;      // squared response for fine low-speed control
+        }
+
+        function gpSetStatus(text, on) {
+            padStatusEl.textContent = text;
+            padStatusEl.className = on ? 'on' : '';
+        }
+
+        function gpActivePad() {
+            var pads = navigator.getGamepads ? navigator.getGamepads() : [];
+            if (gpIndex !== null && pads[gpIndex]) return pads[gpIndex];
+            for (var i = 0; i < pads.length; i++) {
+                if (pads[i] && pads[i].connected && pads[i].mapping === 'standard') { gpIndex = i; return pads[i]; }
+            }
+            return null;
+        }
+
+        function gpReleaseAll() {
+            if (gpDriving) { gpDriving = false; if (pressedKeys.size === 0) drive(0, 0); }
+            if (gpConvActive) { gpConvActive = false; gpLastConv = 0; setStepper(0); }
+            gpCamMoving = false;
+        }
+
+        window.addEventListener('gamepadconnected', function (e) {
+            if (e.gamepad.mapping !== 'standard') { gpSetStatus('Controller: non-standard mapping', false); return; }
+            gpIndex = e.gamepad.index;
+            gpPrevBtn = [];
+            gpAxisHot = [];
+            gpSetStatus('Controller connected', true);
+        });
+        window.addEventListener('gamepaddisconnected', function (e) {
+            if (e.gamepad.index !== gpIndex) return;
+            gpIndex = null;
+            gpReleaseAll();
+            gpSetStatus('No controller', false);
+        });
+
+        function gpTick() {
+            var now = performance.now();
+            var dt = (now - gpLastT) / 1000;
+            gpLastT = now;
+
+            var pad = gpActivePad();
+            if (!pad) return;
+            if (!document.hasFocus()) { gpReleaseAll(); return; }   // no input while page unfocused
+
+            var A = GP_MAP.axes, T = GP_MAP.triggers;
+            function axis(i) { return (i == null || pad.axes[i] === undefined) ? 0 : pad.axes[i]; }
+            function trig(i) { return (i == null || !pad.buttons[i]) ? 0 : pad.buttons[i].value; }
+
+            // Drive: left stick by default
+            var lin = -gpDz(axis(A.driveFwd));     // up = forward
+            var ang = -gpDz(axis(A.driveTurn));    // left = +ang (matches keyboard A/left arrow)
+            if (lin !== 0 || ang !== 0) {
+                gpDriving = true;
+                drive(lin, ang);
+            } else if (gpDriving) {
+                gpDriving = false;
+                if (pressedKeys.size === 0) drive(0, 0);
+            }
+
+            // Conveyor: analog triggers, quantised to the slider step
+            var conv = Math.round((trig(T.convFwd) - trig(T.convRev)) * GP.CONV_MAX / GP.CONV_STEP) * GP.CONV_STEP;
+            if (conv !== gpLastConv) {
+                gpLastConv = conv;
+                gpConvActive = conv !== 0;
+                setStepper(conv);
+            }
+
+            // Camera: rate-controlled
+            var rx = gpDz(axis(A.camPan)), ry = gpDz(axis(A.camTilt));
+            var panSl = document.getElementById('pan-slider');
+            var tiltSl = document.getElementById('tilt-slider');
+            if (rx !== 0 || ry !== 0) {
+                if (!gpCamMoving) { gpPan = parseFloat(panSl.value); gpTilt = parseFloat(tiltSl.value); gpCamMoving = true; }
+                gpPan = Math.min(180, Math.max(0, gpPan + GP.PAN_DIR * rx * GP.PAN_RATE * dt));
+                gpTilt = Math.min(180, Math.max(0, gpTilt + GP.TILT_DIR * ry * GP.TILT_RATE * dt));
+                var sp = Math.round(gpPan / 5) * 5, st = Math.round(gpTilt / 5) * 5;
+                if (sp !== parseFloat(panSl.value) || st !== parseFloat(tiltSl.value)) {
+                    panSl.value = sp; tiltSl.value = st;
+                    updatePanTilt();
+                }
+            } else {
+                gpCamMoving = false;
+            }
+
+            // Buttons: any new press is shown in the readout and runs its bound action
+            for (var i = 0; i < pad.buttons.length; i++) {
+                var down = pad.buttons[i].pressed, was = !!gpPrevBtn[i];
+                gpPrevBtn[i] = down;
+                if (down && !was) {
+                    var name = GP_MAP.buttons[i];
+                    padLastEl.textContent = 'Last button: ' + i + (name ? ' \u2192 ' + name : ' (unbound)');
+                    if (name && GP_ACTIONS[name]) GP_ACTIONS[name]();
+                }
+            }
+            for (var j = 0; j < pad.axes.length; j++) {
+                var hot = Math.abs(pad.axes[j]) > 0.6;
+                if (hot && !gpAxisHot[j]) padLastEl.textContent = 'Last axis: ' + j;
+                gpAxisHot[j] = hot;
+            }
+        }
+
+        setInterval(gpTick, GP.TICK_MS);
+        // Make sure the robot stops if the tab is hidden or the window loses focus
+        document.addEventListener('visibilitychange', function () { if (document.hidden) gpReleaseAll(); });
+        window.addEventListener('blur', gpReleaseAll);
+
+        // ---------- Offline debug: open the page with ?debug to see outgoing commands without a robot ----------
+        if (/[?&]debug\b/.test(location.search)) {
+            var dbg = document.createElement('pre');
+            dbg.style.cssText = 'position:fixed;right:8px;bottom:8px;z-index:99;margin:0;padding:10px 12px;background:#000c;color:#9ef;font:12px/1.4 monospace;border:1px solid #f4a6c0;border-radius:8px;max-width:95vw;white-space:pre-wrap;pointer-events:none';
+            document.body.appendChild(dbg);
+            var dbgState = {}, dbgCount = {};
+            function fake(name) {
+                return { publish: function (m) {
+                    dbgCount[name] = (dbgCount[name] || 0) + 1;
+                    dbgState[name] = JSON.stringify(m);
+                    var out = '';
+                    for (var k in dbgState) out += k.padEnd(18) + '#' + String(dbgCount[k]).padEnd(5) + dbgState[k] + '\n';
+                    dbg.textContent = out;
+                    console.log(name, m);
+                } };
+            }
+            cmdVel = fake('/cmd_vel_teleop');
+            panTiltCmd = fake('/pan_tilt_cmd');
+            dumpCmd = fake('/dump_cmd');
+            convCmd = fake('/conveyor_cmd');
+            speedCmd = fake('/max_speed_cmd');
+            dbg.textContent = 'DEBUG: no robot, commands are logged here\n';
+        }
+
+        updateMaxSpeed(document.getElementById('speed-slider').value);
         renderSelfCheck([0, 0, 0, 0, 0, 0, 0, 0, 0, 0], false);
         connect();
     </script>

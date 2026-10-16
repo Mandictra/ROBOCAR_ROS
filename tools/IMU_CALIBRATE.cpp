@@ -122,11 +122,11 @@ static void stage2() {
   Serial.println("Put a tape mark on the floor/table at the robot's nose (its start heading).");
   Serial.println("After GO: turn the robot ONE FULL TURN COUNTER-CLOCKWISE (seen from above),");
   Serial.println("flat on the surface, smoothly, taking about 6-10 s (not faster than 1 turn per 2 s).");
-  Serial.println("End exactly on your mark and hold still until STOP. The window is 14 s.");
+  Serial.println("End exactly on your mark and hold still until STOP. The window is 30 s.");
   waitEnter();
   countdown();
   Win w;
-  phase("GO - turn now, then hold still at the mark", 14000, w);
+  phase("GO - turn now, then hold still at the mark", 30000, w);
   Serial.println(">>> STOP");
 
   double deg = w.ang[2] * 180.0 / PI;

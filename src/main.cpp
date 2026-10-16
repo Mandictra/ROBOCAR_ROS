@@ -31,15 +31,39 @@
 
 using namespace BLA;
 
+// ================= ROS 2 topics (node "base_controller", no namespace) =================
+// Published by the ESP32 (best effort):
+//   /encoders           std_msgs/Int32MultiArray  20 Hz  [FL, RL, FR, RR ticks, stamp_sec, stamp_nanosec]
+//   /imu_data           sensor_msgs/Imu           20 Hz  frame imu_link; roll/pitch from attitude filter, yaw from EKF
+//   /odometry/filtered  nav_msgs/Odometry         20 Hz  odom -> base_link; EKF pose + velocity (this is Nav2's odom)
+//   /trash_color        geometry_msgs/Vector3     10 Hz  TCS34725 raw R, G, B
+//   /self_check         std_msgs/Int32             1 Hz  2 bits per item (0 not run, 1 pass, 2 fail, 3 check by eye), bit 30 = run toggle
+// Subscribed by the ESP32:
+//   /cmd_vel_raw        geometry_msgs/Twist       drive command in m/s and rad/s (from twist_mux); angular.x > 0.5 asks for heading hold
+//   /pan_tilt_cmd       geometry_msgs/Point       y = tilt servo angle in degrees (x is ignored, there is no pan servo)
+//   /dump_cmd           std_msgs/Float32          dump servo angle, 15..165 degrees
+//   /conveyor_cmd       std_msgs/Float32          conveyor stepper speed in steps/s (+-700)
+//   /self_check_cmd     std_msgs/Int32            any message starts the self-check (ignored while driving)
+//   /heading_hold_cmd   std_msgs/Bool             master switch for heading hold (true again after every agent reconnect)
+//   /max_speed_cmd      std_msgs/Float32          no longer used, kept so old clients do not break
+// =========================================================================================
+
 // ---------- Robot Kinematics (Tune these in meters) ----------
-const float WHEEL_RADIUS = 0.0325f; // From Python file: 0.065m diameter
-const float TRACK_WIDTH = 0.20f;
-const float TICKS_PER_REV = 1000.0f; // Half-quad counts per wheel rev
+const float WHEEL_RADIUS = 0.0425f; // From Python file: 0.065m diameter
+const float TRACK_WIDTH = 0.215f;
+const float TICKS_PER_REV = 748.0f; // Half-quad counts per wheel rev
 const float M_PER_TICK = (2.0f * PI * WHEEL_RADIUS) / TICKS_PER_REV;
 
 // ---------- Wheel speed PI ----------
 #define SPEED_LOOP_MS 50            // must equal the sample time the gains were tuned at (SAMPLE_DT = 0.05 s)
 const float MAX_WHEEL_RPM = 70.0f;  // wheel rpm at normalised speed 1.0 (tuning dashboard range was 0..70 rpm)
+
+// ---------- cmd_vel is in real units (m/s, rad/s) so Nav2 can drive it directly ----------
+const float WHEEL_CIRC      = 2.0f * PI * WHEEL_RADIUS;            // 0.2042 m
+const float MAX_WHEEL_SPEED = MAX_WHEEL_RPM / 60.0f * WHEEL_CIRC;  // 0.238 m/s at 70 rpm
+// Effective track for turn commands. Skid steer turns as if the track were wider than the geometric 0.20 m.
+// Tune: command 1.0 rad/s, read /imu_data angular_velocity.z, TRACK_CMD_new = TRACK_CMD * 1.0 / measured.
+const float TRACK_CMD = 0.30f;
 
 // Wheel labels are from the robot's own perspective (standing behind it, looking the way it drives).
 // Sign that makes each wheel's encoder count positive when the robot rolls forward.
@@ -62,7 +86,7 @@ BLA::Matrix<4, 4> Q = {0.001f, 0.0f,   0.0f,   0.0f,
 
 BLA::Matrix<4, 4> R = {0.05f, 0.0f,  0.0f,  0.0f,
                        0.0f,  0.05f, 0.0f,  0.0f,
-                       0.0f,  0.0f,  0.1f,  0.0f,    // R(2,2) heading: 1.0 = gyro-only for now; set to 0.1f after encoder signs are verified
+                       0.0f,  0.0f,  0.1f,  0.0f,    // R(2,2): unused while Y(2) is forced to 0 below (yaw is gyro-only)
                        0.0f,  0.0f,  0.0f,  0.02f}; // Measurement Noise (Encoder trust)
 
 int32_t last_enc_l = 0;
@@ -138,7 +162,7 @@ static char imu_frame[] = "imu_link";
 
 // ---------- State Variables ----------
 volatile uint32_t last_cmd_ms = 0;
-float max_linear_vel = 0.5;
+float max_linear_vel = 1.0;   // unused now: cmd_vel is in real units, the dashboard scales speed itself
 float current_conveyor_cmd = 0.0;
 
 bool color_active = false;
@@ -149,6 +173,8 @@ float filtered_yaw = 0.0f;  // rad, EKF output
 uint32_t last_filter_us = 0;
 
 // ---------- Heading hold ----------
+// Heading hold output is now a yaw rate in rad/s (cmd_ang is in rad/s): KP in 1/s, KD dimensionless, MAX in rad/s.
+// These were tuned back when the command was normalised, so re-tune on the floor if the hold oscillates or is lazy.
 #define HOLD_KP   1.5f
 #define HOLD_KD   0.15f
 #define HOLD_MAX  0.3f
@@ -255,10 +281,10 @@ static void speed_ctrl_step(float dt) {
   }
 }
 
-// Left/right normalised speed (-1..1) -> wheel rpm targets (executed by speed_ctrl_step()).
+// Left/right normalised speed (-1..1 of MAX_WHEEL_SPEED) -> wheel rpm targets (executed by speed_ctrl_step()).
 void drive_motors(float left_speed, float right_speed) {
-  float left_norm  = constrain(left_speed,  -1.0f, 1.0f) * max_linear_vel;
-  float right_norm = constrain(right_speed, -1.0f, 1.0f) * max_linear_vel;
+  float left_norm  = constrain(left_speed,  -1.0f, 1.0f);
+  float right_norm = constrain(right_speed, -1.0f, 1.0f);
   wheels[0].target_rpm = left_norm  * MAX_WHEEL_RPM;   // FL
   wheels[1].target_rpm = left_norm  * MAX_WHEEL_RPM;   // RL
   wheels[2].target_rpm = right_norm * MAX_WHEEL_RPM;   // FR
@@ -268,17 +294,23 @@ void drive_motors(float left_speed, float right_speed) {
 
 // ---------- ROS 2 Callbacks ----------
 static void apply_drive() {
-  float w = cmd_ang + hold_corr;
-  drive_motors(cmd_lin - w, cmd_lin + w);
+  float w  = cmd_ang + hold_corr;                 // rad/s
+  float vl = cmd_lin - w * TRACK_CMD * 0.5f;      // m/s
+  float vr = cmd_lin + w * TRACK_CMD * 0.5f;
+  float m  = fmaxf(fabsf(vl), fabsf(vr));
+  if (m > MAX_WHEEL_SPEED) { float k = MAX_WHEEL_SPEED / m; vl *= k; vr *= k; }   // clip both sides, keep curvature
+  drive_motors(vl / MAX_WHEEL_SPEED, vr / MAX_WHEEL_SPEED);
 }
 
 void twist_callback(const void * msgin) {
   const geometry_msgs__msg__Twist * msg = (const geometry_msgs__msg__Twist *)msgin;
   last_cmd_ms = millis();
-  cmd_lin = msg->linear.x;
-  cmd_ang = msg->angular.z;
+  cmd_lin = msg->linear.x;     // m/s
+  cmd_ang = msg->angular.z;    // rad/s
 
-  bool want_hold = hold_enabled && imu_active && fabsf(cmd_ang) < 0.02f && fabsf(cmd_lin) > 0.02f;
+  // Heading hold only when the sender asks for it (dashboard sets angular.x = 1, Nav2 leaves it 0)
+  bool hold_req  = msg->angular.x > 0.5f;
+  bool want_hold = hold_enabled && hold_req && imu_active && fabsf(cmd_ang) < 0.02f && fabsf(cmd_lin) > 0.02f;
   if (want_hold && !hold_active) heading_target = filtered_yaw;
   if (!want_hold) hold_corr = 0.0f;
   hold_active = want_hold;
@@ -304,7 +336,7 @@ void conveyor_callback(const void * msgin) {
 
 void speed_callback(const void * msgin) {
   const std_msgs__msg__Float32 * msg = (const std_msgs__msg__Float32 *)msgin;
-  max_linear_vel = constrain(msg->data, 0.1f, 1.0f);
+  (void)msg;   // kept so old clients publishing /max_speed_cmd do not break; speed limiting is on the sender side
 }
 
 void hold_callback(const void * msgin) {
@@ -661,7 +693,7 @@ void loop() {
 
         // --- Zero Velocity Update ---
         static uint32_t still_since = 0;
-        bool still = fabsf(cmd_lin) < 0.01f && fabsf(cmd_ang) < 0.01f;
+        bool still = fabsf(cmd_lin) < 0.003f && fabsf(cmd_ang) < 0.01f;   // m/s, rad/s (lowest moving command is about 0.0017 m/s)
         if (still) {
           if (still_since == 0) still_since = current_time;
           if (current_time - still_since > 1000 && fabsf(gz) < 0.05f) {
@@ -727,6 +759,7 @@ void loop() {
         BLA::Matrix<4> Y = Z - (H * X);
         while (Y(2) > PI)  Y(2) -= 2.0f * PI;
         while (Y(2) < -PI) Y(2) += 2.0f * PI;
+        Y(2) = 0.0f;   // yaw from the gyro only: skid-steer encoders under-read turns and would bias the heading
 
         // Consistency gate: skid-steer encoders can under-read yaw but cannot honestly over-read it.
         // If the encoder heading change exceeds what the gyro allows, the wheels are slipping or off the

@@ -60,7 +60,7 @@ bool MPU6050_Custom::readData(float &ax, float &ay, float &az, float &gx, float 
     // Scale to rad/s, apply Stage 1 static biases, and apply Stage 2 Z-axis scale factor (0.793)
     gx = ((v[4] / 131.0f) * (PI / 180.0f)) - (-0.04539f);
     gy = ((v[5] / 131.0f) * (PI / 180.0f)) - (0.01483f);
-    gz = (((v[6] / 131.0f) * (PI / 180.0f)) - gyro_bias_z) / 0.793f;
+    gz = ((v[6] / 131.0f) * (PI / 180.0f)) - gyro_bias_z;
 
     return true; 
 }
