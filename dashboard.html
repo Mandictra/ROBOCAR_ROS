@@ -205,7 +205,7 @@
                         <button class="d-btn d-right" data-lin="0" data-ang="-1" aria-label="Turn right">&#9654;</button>
                         <button class="d-btn d-down" data-lin="-1" data-ang="0" aria-label="Reverse">&#9660;</button>
                     </div>
-                    <p class="hint pad-hint">Hold a button to drive. Releasing it stops the robot. Laptop: W/↑ forward, S/↓ reverse, A/← left, D/→ right, Space stops.<br>Xbox controller: left stick drives, right stick pans/tilts the camera, RT/LT run the conveyor, RB/LB change the speed limit, A dump, X reset bin, Y center camera. Rebind in <code>GP_MAP</code> in the script.</p>
+                    <p class="hint pad-hint">Hold a button to drive. Releasing it stops the robot. Laptop: W/↑ forward, S/↓ reverse, A/← left, D/→ right, Space stops.<br>Xbox controller: D-pad drives (up/down forward/reverse, left/right turn), right stick pans/tilts the camera, RT/LT run the conveyor, RB/LB change the speed limit, A dump, X reset bin, Y center camera. Rebind in <code>GP_MAP</code> in the script.</p>
                     <p class="hint pad-hint" id="pad-last">Press a controller button to see its index here.</p>
                 </div>
             </section>
@@ -495,8 +495,8 @@
         }
 
         // cmd_vel is in real units (m/s, rad/s). The speed slider scales these here; the firmware no longer has a speed limit.
-        var VMAX = 0.238;   // m/s at slider 1.0 (70 rpm wheel limit)
-        var WMAX = 1.6;     // rad/s at slider 1.0, pure spin (depends on TRACK_CMD in main.cpp)
+        var VMAX = 0.479;   // m/s at slider 1.0 (120 rpm wheel limit, wheel radius 0.0381 m)
+        var WMAX = 2.0;     // rad/s at slider 1.0 = MAX_YAW_RATE in main.cpp (firmware caps turn rate for clean maps)
 
         function updateMaxSpeed(val) {
             document.getElementById('speed-val').innerText = (parseFloat(val) * VMAX).toFixed(2) + " m/s";
@@ -707,7 +707,8 @@
         // To rebind, edit GP_MAP. Set an axis or trigger to null to disable it. The line under the drive pad
         // shows the index of whatever you press, so you can find the number for any button.
         var GP_MAP = {
-            axes:     { driveFwd: 1, driveTurn: 0, camPan: 2, camTilt: 3 },
+            axes:     { camPan: 2, camTilt: 3 },                       // left stick no longer drives
+            dpad:     { fwd: 12, rev: 13, left: 14, right: 15 },      // D-pad drives (standard mapping indices)
             triggers: { convFwd: 7, convRev: 6 },
             buttons:  { 0: 'dump', 2: 'resetBin', 3: 'centerCam', 5: 'speedUp', 4: 'speedDown' }
             // actions: dump, resetBin, centerCam, speedUp, speedDown, stop
@@ -720,7 +721,8 @@
             TILT_DIR: -1,        // stick up (axis < 0) increases tilt
             CONV_MAX: 700,
             CONV_STEP: 50,
-            TICK_MS: 50
+            TICK_MS: 50,
+            DPAD_TURN: 1.0       // turn command for D-pad left/right, as a fraction of the speed slider's WMAX
         };
         var gpIndex = null;
         var gpDriving = false;
@@ -803,9 +805,11 @@
             function axis(i) { return (i == null || pad.axes[i] === undefined) ? 0 : pad.axes[i]; }
             function trig(i) { return (i == null || !pad.buttons[i]) ? 0 : pad.buttons[i].value; }
 
-            // Drive: left stick by default
-            var lin = -gpDz(axis(A.driveFwd));     // up = forward
-            var ang = -gpDz(axis(A.driveTurn));    // left = +ang (matches keyboard A/left arrow)
+            // Drive: D-pad. Speed is set by the speed slider (RB/LB), same as the on-screen buttons.
+            var DP = GP_MAP.dpad;
+            function held(i) { return (i != null && pad.buttons[i] && pad.buttons[i].pressed) ? 1 : 0; }
+            var lin = held(DP.fwd) - held(DP.rev);                     // up = forward, down = reverse
+            var ang = (held(DP.left) - held(DP.right)) * GP.DPAD_TURN; // left = +ang (matches keyboard A/left arrow)
             if (lin !== 0 || ang !== 0) {
                 gpDriving = true;
                 drive(lin, ang);

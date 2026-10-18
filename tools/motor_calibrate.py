@@ -45,7 +45,7 @@ FF_SPEEDUP = (0.4, 0.7, 1.0)  # after the PI is accepted, try these FF fractions
 ADAPTIVE_LEVELS = True    # after the first fit, add open-loop steps at the PWM predicted to give REFINE_RPMS (covers low speeds)
 REFINE_RPMS = (15.0, 35.0)  # wheel speeds the extra identification steps aim for
 MIN_TEST_PWM = 40         # never test below this PWM (inside the dead-band the motor does not move)
-SWEEP_SPEEDS = (10.0, 20.0, 30.0, 50.0, 70.0)  # speeds of the SPEED SWEEP (forward and reverse); firmware clamps at 70
+SWEEP_SPEEDS = (10.0, 20.0, 30.0, 50.0, 70.0, 100.0, 120.0)  # firmware clamps at 120  # speeds of the SPEED SWEEP (forward and reverse); firmware clamps at 70
 SWEEP_SPREAD_RPM = 2.5    # sweep flags a speed when the motors' final rpm differ by more than this
 SWEEP_AFTER_AUTOTUNE = True  # run the sweep automatically after a successful autotune
 VERIFY_RPM = 30.0         # closed-loop verification step after tuning (capped at 80% of the fast open-loop step)
@@ -646,7 +646,7 @@ def update_plot():
         sync_sliders()
     if not is_paused:
         ax.clear()
-        ax.set_ylim(-80, 80)
+        ax.set_ylim(-150, 150)   
         ax.set_title("Live Motor RPM")
         ax.set_ylabel("RPM")
         if len(data['Target']) > 0:
@@ -712,7 +712,7 @@ tk.Radiobutton(dir_frame, text="Reverse gains", variable=dir_var, value="R", com
 slider_len = 300
 
 tk.Label(ctrl_frame, text="Target RPM").pack(pady=(15, 0))
-rpm_slider = tk.Scale(ctrl_frame, from_=-70, to=70, length=slider_len, orient=tk.HORIZONTAL, command=lambda v: send_command('T', v))
+rpm_slider = tk.Scale(ctrl_frame, from_=-120, to=120, length=slider_len, orient=tk.HORIZONTAL, command=lambda v: send_command('T', v))
 rpm_slider.pack()
 
 rpm_entry = tk.Entry(ctrl_frame, justify='center', width=20)
@@ -751,7 +751,7 @@ tk.Button(btn_frame3, text="RESET TO DEFAULT", font=("Arial", 10, "bold"), width
 btn_frame4 = tk.Frame(ctrl_frame)
 btn_frame4.pack(pady=5)
 tk.Button(btn_frame4, text="STEP TEST (all motors)", font=("Arial", 10, "bold"), width=32, command=start_step_test).pack()
-tk.Button(btn_frame4, text="SPEED SWEEP (10-70 rpm, fwd+rev)", font=("Arial", 10, "bold"), width=32, command=start_speed_sweep).pack(pady=(5, 0))
+tk.Button(btn_frame4, text="SPEED SWEEP (10-120 rpm, fwd+rev)", font=("Arial", 10, "bold"), width=32, command=start_speed_sweep).pack(pady=(5, 0))
 tk.Button(btn_frame4, text="UPLOAD PID TEST (then tune)", font=("Arial", 10, "bold"), width=32, bg="#ddddee", command=start_flash_test).pack(pady=(5, 0))
 tk.Button(btn_frame4, text="SAVE + UPLOAD ROBOT FIRMWARE", font=("Arial", 10, "bold"), width=32, bg="#ddeedd", command=start_flash_robot).pack(pady=(5, 0))
 tk.Button(btn_frame4, text="RECONNECT", font=("Arial", 10, "bold"), width=32, command=start_reconnect).pack(pady=(5, 0))

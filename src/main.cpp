@@ -49,21 +49,23 @@ using namespace BLA;
 // =========================================================================================
 
 // ---------- Robot Kinematics (Tune these in meters) ----------
-const float WHEEL_RADIUS = 0.0425f; // From Python file: 0.065m diameter
+const float WHEEL_RADIUS = 0.0381f; // 76.2 mm wheel diameter (verified by distance test)
 const float TRACK_WIDTH = 0.215f;
 const float TICKS_PER_REV = 748.0f; // Half-quad counts per wheel rev
 const float M_PER_TICK = (2.0f * PI * WHEEL_RADIUS) / TICKS_PER_REV;
 
 // ---------- Wheel speed PI ----------
 #define SPEED_LOOP_MS 50            // must equal the sample time the gains were tuned at (SAMPLE_DT = 0.05 s)
-const float MAX_WHEEL_RPM = 70.0f;  // wheel rpm at normalised speed 1.0 (tuning dashboard range was 0..70 rpm)
+const float MAX_WHEEL_RPM = 120.0f;  // wheel rpm at normalised speed 1.0 (tuning dashboard range is 0..120 rpm)
 
 // ---------- cmd_vel is in real units (m/s, rad/s) so Nav2 can drive it directly ----------
-const float WHEEL_CIRC      = 2.0f * PI * WHEEL_RADIUS;            // 0.2042 m
-const float MAX_WHEEL_SPEED = MAX_WHEEL_RPM / 60.0f * WHEEL_CIRC;  // 0.238 m/s at 70 rpm
+const float WHEEL_CIRC      = 2.0f * PI * WHEEL_RADIUS;            // 0.2394 m
+const float MAX_WHEEL_SPEED = MAX_WHEEL_RPM / 60.0f * WHEEL_CIRC;  // 0.479 m/s at 120 rpm
 // Effective track for turn commands. Skid steer turns as if the track were wider than the geometric 0.20 m.
 // Tune: command 1.0 rad/s, read /imu_data angular_velocity.z, TRACK_CMD_new = TRACK_CMD * 1.0 / measured.
 const float TRACK_CMD = 0.30f;
+// Cap on the commanded turn rate. Keeps lidar scans clean for SLAM; keep dashboard WMAX and Nav2 max angular <= this.
+const float MAX_YAW_RATE = 2.0f;   // rad/s
 
 // Wheel labels are from the robot's own perspective (standing behind it, looking the way it drives).
 // Sign that makes each wheel's encoder count positive when the robot rolls forward.
@@ -305,8 +307,8 @@ static void apply_drive() {
 void twist_callback(const void * msgin) {
   const geometry_msgs__msg__Twist * msg = (const geometry_msgs__msg__Twist *)msgin;
   last_cmd_ms = millis();
-  cmd_lin = msg->linear.x;     // m/s
-  cmd_ang = msg->angular.z;    // rad/s
+  cmd_ang = constrain(msg->angular.z, -MAX_YAW_RATE, MAX_YAW_RATE);    // rad/s, capped
+  cmd_lin = msg->linear.x * (1.0f - 0.5f * fabsf(cmd_ang) / MAX_YAW_RATE);   // m/s, slower in turns
 
   // Heading hold only when the sender asks for it (dashboard sets angular.x = 1, Nav2 leaves it 0)
   bool hold_req  = msg->angular.x > 0.5f;

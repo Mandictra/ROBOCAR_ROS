@@ -5,7 +5,7 @@
 // Index order everywhere: 0=FL('1'), 1=FR('2'), 2=RL('3'), 3=RR('4'). Selector 'A' = all.
 ESP32Encoder enc[4];
 
-const float TICKS_PER_REV = 1000.0f;
+const float TICKS_PER_REV = 748.0f;
 const int SAMPLE_TIME_MS = 50;  // must match SAMPLE_DT in motor_calibrate.py
 
 const int IN1[4] = {FL_IN1, FR_IN1, RL_IN1, RR_IN1};
@@ -108,7 +108,7 @@ void handle_serial() {
     if (sel != 'A' && sel != ('1' + i)) continue;
     switch (cmd) {
       case 'T':
-        target[i] = constrain(val, -70.0f, 70.0f);
+        target[i] = constrain(val, -120.0f, 120.0f);
         target_rpm = target[i];
         pid[i].open_loop = false;
         break;
