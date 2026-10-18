@@ -44,7 +44,7 @@ Thumbs.db
 # =========================
 # LaTeX / TeXstudio
 # =========================
-*.pdf
+
 *.aux
 *.log
 *.out
@@ -58,4 +58,4 @@ Thumbs.db
 *.blg
 *.run.xml
 *.lof
-*.lot
+*.lotcheckout features.pdf

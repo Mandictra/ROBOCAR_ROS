@@ -1,0 +1,27 @@
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {1.1}{\ignorespaces Symbols used in this report.}}{7}{table.caption.4}%
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {2.1}{\ignorespaces Hardware summary. Values marked \textcolor {warnred}{\textbf {[TODO: ]}} must be completed by the builder.}}{8}{table.caption.6}%
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {4.1}{\ignorespaces Serial commands accepted by \texttt {PID\_TEST.cpp}. Example: \texttt {TA30} sets all wheels to 30\,rpm; \texttt {P25.5} sets $K_p$ of wheel 2 (FR) to 5.5 --- note that the value starts right after the selector.}}{17}{table.caption.13}%
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {5.1}{\ignorespaces Environment variables read by the dashboard.}}{18}{table.caption.14}%
+\contentsline {table}{\numberline {5.2}{\ignorespaces Autotune constants in \texttt {motor\_calibrate.py}.}}{19}{table.caption.15}%
+\contentsline {table}{\numberline {5.3}{\ignorespaces Dashboard controls.}}{21}{table.caption.17}%
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {6.1}{\ignorespaces Public functions of \texttt {autotune\_math.py}.}}{22}{table.caption.18}%
+\contentsline {table}{\numberline {6.2}{\ignorespaces True and identified parameters of the simulated motor.}}{25}{table.caption.23}%
+\contentsline {table}{\numberline {6.3}{\ignorespaces \texttt {verify\_motor} on the simulated motor, 30\,rpm step. A round passes if overshoot $\le 5$\,\% and ripple $\le 3$\,rpm.}}{25}{table.caption.25}%
+\contentsline {table}{\numberline {6.4}{\ignorespaces Effect of the design parameter $\tau _c$ (simulated motor, $F=0$, 30\,rpm step). Values of $\tau _c$ below $L$ give the same gains, because of the $\max (\tau _c,L)$ floor.}}{26}{table.caption.27}%
+\contentsline {table}{\numberline {6.5}{\ignorespaces Effect of the feedforward fraction $f$ ($F=f/K$) with the round-1 gains and no detuning (simulated motor).}}{26}{table.caption.28}%
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {9.1}{\ignorespaces Identified plant parameters (copy from the console). \textcolor {warnred}{\textbf {[TODO: Fill in.]}}}}{33}{table.caption.32}%
+\contentsline {table}{\numberline {9.2}{\ignorespaces Final gains. \textcolor {warnred}{\textbf {[TODO: Fill in from \texttt {tuned\_gains.json}.]}}}}{33}{table.caption.33}%
+\contentsline {table}{\numberline {9.3}{\ignorespaces Closed-loop verification at 30\,rpm. \textcolor {warnred}{\textbf {[TODO: Fill in.]}}}}{34}{table.caption.34}%
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
