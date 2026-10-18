@@ -50,6 +50,7 @@ Thumbs.db
 *.out
 *.toc
 *.fls
+*.lot
 *.fdb_latexmk
 *.synctex.gz
 *.synctex(busy)
