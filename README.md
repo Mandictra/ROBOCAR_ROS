@@ -2,7 +2,8 @@
 
 A four-wheel skid-steer robot that drives, senses and sorts waste. An **ESP32-S3** runs the real-time work (wheel speed control, encoders, IMU, colour sensor, servos, conveyor, state estimation, failsafe) and joins a **ROS 2 Jazzy** graph through **micro-ROS** over a serial cable. A host computer (laptop under WSL 2, or a Raspberry Pi on the robot) runs the micro-ROS agent, `twist_mux`, rosbridge and the navigation stack. A browser **dashboard** provides manual control and live telemetry.
 
-> **Full documentation:** [`docs/ROS2_ESP32_Setup_Guide-v3.tex`](docs/ROS2_ESP32_Setup_Guide-v3.tex) is the complete manual (setup from scratch, how micro-ROS works, firmware internals, dashboard, troubleshooting). This README is the short version.
+> **Full documentation:** [`ROS2_ESP32_Setup_Guide-v3.tex`](https://github.com/mandictra/ROBOCAR_ROS/blob/esp32_documentation/ROS2_ESP32_GUIDE/ROS2_ESP32_Setup_Guide-v2.pdf) is the complete manual (setup from scratch, how micro-ROS works, firmware internals, dashboard, troubleshooting). This README is the short version.
+
 
 ---
 
