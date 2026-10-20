@@ -48,27 +48,42 @@ Browser (dashboard.html) --WebSocket:9090--> rosbridge --\
                        motors, encoders, servos, stepper, MPU6050, TCS34725
 ```
 
-## Repository layout
+## Repository Layout
 
-```
+```text
 .
-├── platformio.ini            Build settings for the ESP32-S3
-├── custom.meta               micro-ROS entity limits (read when the micro-ROS library is built)
-├── src/
-│   ├── main.cpp              Firmware: micro-ROS, control loops, estimation, self-check
-│   └── MPU6050_Custom.cpp    IMU driver
-├── include/
-│   ├── pins.h                Pin map, motor polarity, limits, command timeout
-│   ├── gains.h               Per-wheel PI gains (AUTO-GENERATED, do not edit by hand)
-│   ├── attitude.h            Roll/pitch complementary filter
-│   └── MPU6050_Custom.h      IMU driver header
-├── tuned_gains.json          Calibration output that gains.h is generated from
-├── twist_mux_config.yaml     Manual (priority 50) vs Nav2 (priority 10) command sources
-├── run_all.sh                Starts agent, rosbridge, twist_mux and the web server
-├── dashboard.html            Web dashboard
-└── docs/
-    └── ROS2_ESP32_Setup_Guide-v3.tex   Full manual
-```
+├── platformio.ini              # Build settings and library dependencies for ESP32-S3
+├── custom.meta                 # micro-ROS entity limits (read during library build)
+├── run_all.sh                  # Host script: starts micro-ROS agent, rosbridge, twist_mux & dashboard
+├── twist_mux_config.yaml       # ROS 2 config: prioritizes Nav2 (10) vs manual control (50)
+├── dashboard.html              # Web-based control dashboard
+├── requirements.txt            # Python dependencies for calibration tools
+│
+├── src/                        
+│   ├── main.cpp                # Core firmware: micro-ROS, control loops, motor logic
+│   └── attitude.h              # Roll/pitch complementary filter implementation
+│
+├── include/                    
+│   ├── pins.h                  # Pin mapping, motor polarities, hardware limits
+│   └── gains.h                 # Per-wheel PI gains (Auto-generated, do not edit)
+│
+├── lib/                        
+│   └── MPU6050_Custom/         # Custom IMU driver bypassing standard heavy libraries
+│       ├── MPU6050_Custom.cpp
+│       └── MPU6050_Custom.h
+│
+├── tools/                      # Calibration, testing, and generation scripts
+│   ├── motor_calibrate.py      # Automated motor profiling
+│   ├── IMU_CALIBRATE.py        # IMU offset calculation script
+│   ├── autotune_math.py        # Math routines for PID tuning
+│   ├── json_to_gains_h.py      # Parses tuned_gains.json into include/gains.h
+│   ├── tuned_gains.json        # Output of the calibration process
+│   └── *.cpp                   # Hardware unit tests (I2C scanner, motor RPM, PID test)
+│
+└── media/                      # Documentation assets and images
+    ├── MAIN.pdf
+    └── Soldered circuit...jpeg
+
 
 `gains.h` is produced from `tuned_gains.json` by the calibration tooling (`motor_calibrate.py`, named in the header of `gains.h`). That tooling is not included in this repository yet.
 
