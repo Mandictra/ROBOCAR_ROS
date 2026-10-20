@@ -140,8 +140,8 @@ rcl_subscription_t dump_sub;
 std_msgs__msg__Float32 dump_msg;
 rcl_subscription_t conv_sub;
 std_msgs__msg__Float32 conv_msg;
-rcl_subscription_t speed_sub;
-std_msgs__msg__Float32 speed_msg;
+
+
 
 rcl_subscription_t hold_sub;
 std_msgs__msg__Bool hold_msg;
@@ -336,10 +336,7 @@ void conveyor_callback(const void * msgin) {
   conveyorStepper.setSpeed(current_conveyor_cmd);
 }
 
-void speed_callback(const void * msgin) {
-  const std_msgs__msg__Float32 * msg = (const std_msgs__msg__Float32 *)msgin;
-  (void)msg;   // kept so old clients publishing /max_speed_cmd do not break; speed limiting is on the sender side
-}
+
 
 void hold_callback(const void * msgin) {
   const std_msgs__msg__Bool * msg = (const std_msgs__msg__Bool *)msgin;
@@ -479,25 +476,25 @@ static bool create_entities() {
   RC_OK(rclc_support_init(&support, 0, NULL, &allocator));
   RC_OK(rclc_node_init_default(&node, "base_controller", "", &support));
 
-  RC_OK(rclc_publisher_init_best_effort(&enc_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32MultiArray), "encoders"));
-  RC_OK(rclc_publisher_init_best_effort(&color_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Vector3), "trash_color"));
+  RC_OK(rclc_publisher_init_best_effort(&enc_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32MultiArray), "sensors/wheel_ticks"));
+  RC_OK(rclc_publisher_init_best_effort(&color_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Vector3), "sensors/color/rgb"));
   RC_OK(rclc_publisher_init_best_effort(&imu_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu), "imu_data"));
   RC_OK(rclc_publisher_init_best_effort(&odom_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry), "odometry/filtered"));
 
   rmw_uros_sync_session(1000);
 
   RC_OK(rclc_subscription_init_default(&twist_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist), "cmd_vel_raw"));
-  RC_OK(rclc_subscription_init_default(&pan_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Point), "pan_tilt_cmd"));
-  RC_OK(rclc_subscription_init_default(&dump_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32), "dump_cmd"));
-  RC_OK(rclc_subscription_init_default(&conv_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32), "conveyor_cmd"));
-  RC_OK(rclc_subscription_init_default(&speed_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32), "max_speed_cmd"));
+  RC_OK(rclc_subscription_init_default(&pan_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Point), "actuators/tilt_cmd"));
+  RC_OK(rclc_subscription_init_default(&dump_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32), "actuators/dump_cmd"));
+  RC_OK(rclc_subscription_init_default(&conv_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32), "actuators/conveyor_cmd"));
+  
 
-  RC_OK(rclc_executor_init(&executor, &support.context, 7, &allocator));
+  RC_OK(rclc_executor_init(&executor, &support.context, 6, &allocator));
   RC_OK(rclc_executor_add_subscription(&executor, &twist_sub, &twist_msg, &twist_callback, ON_NEW_DATA));
   RC_OK(rclc_executor_add_subscription(&executor, &pan_sub, &pan_msg, &pan_callback, ON_NEW_DATA));
   RC_OK(rclc_executor_add_subscription(&executor, &dump_sub, &dump_msg, &dump_callback, ON_NEW_DATA));
   RC_OK(rclc_executor_add_subscription(&executor, &conv_sub, &conv_msg, &conveyor_callback, ON_NEW_DATA));
-  RC_OK(rclc_executor_add_subscription(&executor, &speed_sub, &speed_msg, &speed_callback, ON_NEW_DATA));
+  
 
   sc_enabled =
     rclc_publisher_init_best_effort(&sc_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32), "self_check") == RCL_RET_OK &&
@@ -523,7 +520,6 @@ static void destroy_entities() {
   (void)rcl_subscription_fini(&pan_sub, &node);
   (void)rcl_subscription_fini(&dump_sub, &node);
   (void)rcl_subscription_fini(&conv_sub, &node);
-  (void)rcl_subscription_fini(&speed_sub, &node);
   (void)rcl_subscription_fini(&sc_sub, &node);
   (void)rcl_subscription_fini(&hold_sub, &node);
   (void)rclc_executor_fini(&executor);

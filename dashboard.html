@@ -322,7 +322,7 @@
         var ros = null;
         var statusEl = document.getElementById('status');
         var reconnectDelayMs = 1000;
-        var cmdVel, panTiltCmd, dumpCmd, convCmd, speedCmd, scCmd;
+        var cmdVel, panTiltCmd, dumpCmd, convCmd,scCmd;
 
         // rosbridge host: ?host=<ip> overrides, otherwise whichever machine served this page.
         // Opened straight from disk (file://) there is no hostname, so pass ?host=<pi-ip> (falls back to localhost).
@@ -364,7 +364,7 @@
 
         function attachTopics() {
             // Firmware publishes encoders as [FL, RL, FR, RR]
-            var encListener = new ROSLIB.Topic({ ros: ros, name: '/encoders', messageType: 'std_msgs/msg/Int32MultiArray' });
+            var encListener = new ROSLIB.Topic({ ros: ros, name: '/sensors/wheel_ticks', messageType: 'std_msgs/msg/Int32MultiArray' });
             encListener.subscribe(function (m) {
                 document.getElementById('enc-fl').innerText = m.data[0];
                 document.getElementById('enc-rl').innerText = m.data[1];
@@ -396,7 +396,7 @@
                 setStale(['grp-heading', 'grp-accel'], false);
             });
 
-            var colorListener = new ROSLIB.Topic({ ros: ros, name: '/trash_color', messageType: 'geometry_msgs/msg/Vector3' });
+            var colorListener = new ROSLIB.Topic({ ros: ros, name: '/sensors/color_rgb', messageType: 'geometry_msgs/msg/Vector3' });
             colorListener.subscribe(function (m) {
                 document.getElementById('col-r').innerText = Math.round(m.x);
                 document.getElementById('col-g').innerText = Math.round(m.y);
@@ -411,10 +411,10 @@
             });
 
             cmdVel = new ROSLIB.Topic({ ros: ros, name: '/cmd_vel_teleop', messageType: 'geometry_msgs/msg/Twist' });
-            panTiltCmd = new ROSLIB.Topic({ ros: ros, name: '/pan_tilt_cmd', messageType: 'geometry_msgs/msg/Point' });
-            dumpCmd = new ROSLIB.Topic({ ros: ros, name: '/dump_cmd', messageType: 'std_msgs/msg/Float32' });
-            convCmd = new ROSLIB.Topic({ ros: ros, name: '/conveyor_cmd', messageType: 'std_msgs/msg/Float32' });
-            speedCmd = new ROSLIB.Topic({ ros: ros, name: '/max_speed_cmd', messageType: 'std_msgs/msg/Float32' });
+            panTiltCmd = new ROSLIB.Topic({ ros: ros, name: '/actuators/tilt_cmd', messageType: 'geometry_msgs/msg/Point' });
+            dumpCmd = new ROSLIB.Topic({ ros: ros, name: '/actuators/dump_cmd', messageType: 'std_msgs/msg/Float32' });
+            convCmd = new ROSLIB.Topic({ ros: ros, name: '/actuators/conveyor_cmd', messageType: 'std_msgs/msg/Float32' });
+            
 
             scCmd = new ROSLIB.Topic({ ros: ros, name: '/self_check_cmd', messageType: 'std_msgs/msg/Int32' });
             var scListener = new ROSLIB.Topic({ ros: ros, name: '/self_check', messageType: 'std_msgs/msg/Int32' });
@@ -721,7 +721,7 @@
             TILT_DIR: -1,        // stick up (axis < 0) increases tilt
             CONV_MAX: 700,
             CONV_STEP: 50,
-            TICK_MS: 50,
+            TICK_MS: 150,
             DPAD_TURN: 1.0       // turn command for D-pad left/right, as a fraction of the speed slider's WMAX
         };
         var gpIndex = null;
@@ -885,7 +885,7 @@
             panTiltCmd = fake('/pan_tilt_cmd');
             dumpCmd = fake('/dump_cmd');
             convCmd = fake('/conveyor_cmd');
-            speedCmd = fake('/max_speed_cmd');
+            
             dbg.textContent = 'DEBUG: no robot, commands are logged here\n';
         }
 
