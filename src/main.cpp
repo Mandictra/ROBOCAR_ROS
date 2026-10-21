@@ -32,20 +32,23 @@
 using namespace BLA;
 
 // ================= ROS 2 topics (node "base_controller", no namespace) =================
-// Published by the ESP32 (best effort):
-//   /encoders           std_msgs/Int32MultiArray  20 Hz  [FL, RL, FR, RR ticks, stamp_sec, stamp_nanosec]
-//   /imu_data           sensor_msgs/Imu           20 Hz  frame imu_link; roll/pitch from attitude filter, yaw from EKF
-//   /odometry/filtered  nav_msgs/Odometry         20 Hz  odom -> base_link; EKF pose + velocity (this is Nav2's odom)
-//   /trash_color        geometry_msgs/Vector3     10 Hz  TCS34725 raw R, G, B
-//   /self_check         std_msgs/Int32             1 Hz  2 bits per item (0 not run, 1 pass, 2 fail, 3 check by eye), bit 30 = run toggle
-// Subscribed by the ESP32:
-//   /cmd_vel_raw        geometry_msgs/Twist       drive command in m/s and rad/s (from twist_mux); angular.x > 0.5 asks for heading hold
-//   /pan_tilt_cmd       geometry_msgs/Point       y = tilt servo angle in degrees (x is ignored, there is no pan servo)
-//   /dump_cmd           std_msgs/Float32          dump servo angle, 15..165 degrees
-//   /conveyor_cmd       std_msgs/Float32          conveyor stepper speed in steps/s (+-700)
-//   /self_check_cmd     std_msgs/Int32            any message starts the self-check (ignored while driving)
-//   /heading_hold_cmd   std_msgs/Bool             master switch for heading hold (true again after every agent reconnect)
-//   /max_speed_cmd      std_msgs/Float32          no longer used, kept so old clients do not break
+// Published by the ESP32 (all best effort QoS, so subscribers must also use best effort or sensor-data QoS):
+//   sensors/wheel_ticks  std_msgs/Int32MultiArray  20 Hz  [FL, RL, FR, RR ticks, stamp_sec, stamp_nanosec]
+//   imu_data             sensor_msgs/Imu           20 Hz  frame imu_link; roll/pitch from attitude filter, yaw from gyro integration
+//                                                         (orientation yaw covariance is 1e3: do not fuse it as an absolute heading)
+//   odometry/filtered    nav_msgs/Odometry         20 Hz  frame odom -> child base_link; EKF pose + velocity (this is Nav2's odom)
+//                                                         NO TF is broadcast by the ESP32: the RPi5 must publish odom -> base_link from this topic
+//   sensors/color/rgb    geometry_msgs/Vector3     10 Hz  TCS34725 raw R, G, B
+//   self_check           std_msgs/Int32             1 Hz  2 bits per item (0 not run, 1 pass, 2 fail, 3 check by eye), bit 30 = run toggle
+// Subscribed by the ESP32 (default reliable QoS):
+//   cmd_vel_raw          geometry_msgs/Twist       drive command in m/s and rad/s (from twist_mux); angular.x > 0.5 asks for heading hold
+//   actuators/tilt_cmd   geometry_msgs/Point       y = tilt servo angle in degrees (x is ignored, there is no pan servo)
+//   actuators/dump_cmd   std_msgs/Float32          dump servo angle, 15..165 degrees
+//   actuators/conveyor_cmd std_msgs/Float32        conveyor stepper speed in steps/s (+-700)
+//   self_check_cmd       std_msgs/Int32            any message starts the self-check (ignored while driving)
+//   heading_hold_cmd     std_msgs/Bool             master switch for heading hold (true again after every agent reconnect)
+// Timestamps (wheel_ticks, imu_data, odometry/filtered) are agent-synchronised epoch time. Nothing stamped is published
+// until the time sync with the agent has succeeded, so the agent must run on the same machine/clock as the lidar driver.
 // =========================================================================================
 
 // ---------- Robot Kinematics (Tune these in meters) ----------
@@ -61,11 +64,14 @@ const float MAX_WHEEL_RPM = 120.0f;  // wheel rpm at normalised speed 1.0 (tunin
 // ---------- cmd_vel is in real units (m/s, rad/s) so Nav2 can drive it directly ----------
 const float WHEEL_CIRC      = 2.0f * PI * WHEEL_RADIUS;            // 0.2394 m
 const float MAX_WHEEL_SPEED = MAX_WHEEL_RPM / 60.0f * WHEEL_CIRC;  // 0.479 m/s at 120 rpm
-// Effective track for turn commands. Skid steer turns as if the track were wider than the geometric 0.20 m.
+// Effective track for turn commands. Skid steer turns as if the track were wider than the geometric 0.215 m (TRACK_WIDTH).
 // Tune: command 1.0 rad/s, read /imu_data angular_velocity.z, TRACK_CMD_new = TRACK_CMD * 1.0 / measured.
 const float TRACK_CMD = 0.30f;
 // Cap on the commanded turn rate. Keeps lidar scans clean for SLAM; keep dashboard WMAX and Nav2 max angular <= this.
 const float MAX_YAW_RATE = 2.0f;   // rad/s
+// Fraction of linear speed removed at full turn rate. 0 = pass cmd_vel through unchanged (right for Nav2, so its
+// predicted trajectories match what the robot does). The old behaviour was 0.5 (set it back if the dashboard needs it).
+#define TURN_SLOWDOWN 0.0f
 
 // Wheel labels are from the robot's own perspective (standing behind it, looking the way it drives).
 // Sign that makes each wheel's encoder count positive when the robot rolls forward.
@@ -75,20 +81,26 @@ const float MAX_YAW_RATE = 2.0f;   // rad/s
 const int S_FL = MOTOR_DIR_FL, S_RL = MOTOR_DIR_RL, S_FR = MOTOR_DIR_FR, S_RR = MOTOR_DIR_RR;
 
 // ---------- EKF Matrices (4-State) ----------
+// State X = [x, y, theta, v]. Prediction: gyro for theta, gravity-compensated accelerometer for v.
+// Measurement: encoder forward velocity only (H = [0 0 0 1]). x, y and theta are dead-reckoned, so their covariance
+// grows with distance/time instead of being reset by fake measurements.
 BLA::Matrix<4> X = {0.0f, 0.0f, 0.0f, 0.0f}; // State vector [x, y, theta, v]
 BLA::Matrix<4, 4> P = {1.0f, 0.0f, 0.0f, 0.0f,
                        0.0f, 1.0f, 0.0f, 0.0f,
                        0.0f, 0.0f, 1.0f, 0.0f,
                        0.0f, 0.0f, 0.0f, 1.0f}; // Covariance Matrix
 
+// Process noise per 50 ms step. Q(2,2) = 1e-5 is my estimate for gyro-integrated yaw (the old 0.005 was far too pessimistic):
+// tune it against measured yaw drift, e.g. a 10 minute still test and a few full-lap runs.
 BLA::Matrix<4, 4> Q = {0.001f, 0.0f,   0.0f,   0.0f,
                        0.0f,   0.001f, 0.0f,   0.0f,
-                       0.0f,   0.0f,   0.005f, 0.0f,
+                       0.0f,   0.0f,   1e-5f,  0.0f,
                        0.0f,   0.0f,   0.0f,   0.05f}; // Process Noise (Gyro & Accel trust)
 
+// Measurement noise: only R(3,3) (encoder velocity) is used. The other entries are kept for reference.
 BLA::Matrix<4, 4> R = {0.05f, 0.0f,  0.0f,  0.0f,
                        0.0f,  0.05f, 0.0f,  0.0f,
-                       0.0f,  0.0f,  0.1f,  0.0f,    // R(2,2): unused while Y(2) is forced to 0 below (yaw is gyro-only)
+                       0.0f,  0.0f,  0.1f,  0.0f,
                        0.0f,  0.0f,  0.0f,  0.02f}; // Measurement Noise (Encoder trust)
 
 int32_t last_enc_l = 0;
@@ -101,6 +113,11 @@ AccelStepper conveyorStepper(AccelStepper::FULL4WIRE, CONV_IN1, CONV_IN3, CONV_I
 Adafruit_TCS34725 tcs = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_50MS, TCS34725_GAIN_4X);
 MPU6050_Custom imuSensor;
 Attitude att;   // roll/pitch complementary filter + ramp flag (ROS FLU frame)
+
+// ---------- IMU oversampling (200 Hz read, averaged down to the 50 ms estimator tick) ----------
+static float    imu_acc[6] = {0, 0, 0, 0, 0, 0};   // ax ay az gx gy gz sums
+static uint16_t imu_acc_n  = 0;
+float gz_bias0 = 0.0f;                              // boot-calibrated gyro z bias, centre of the clamp used while driving
 
 #define SERVO_MIN_PULSE_US 500
 #define SERVO_MAX_PULSE_US 2400
@@ -169,6 +186,11 @@ float current_conveyor_cmd = 0.0;
 
 bool color_active = false;
 bool imu_active = false;
+bool imu_ok = false;          // true only while the IMU delivered a fresh sample this cycle; odometry keeps running without it
+
+// True once the micro-ROS agent time sync has succeeded for the current session. Stamped topics are held back until then
+// (an unsynced epoch clock gives bogus stamps and TF would drop every message).
+bool time_synced = false;
 
 // ---------- Yaw estimate ----------
 float filtered_yaw = 0.0f;  // rad, EKF output
@@ -308,11 +330,11 @@ void twist_callback(const void * msgin) {
   const geometry_msgs__msg__Twist * msg = (const geometry_msgs__msg__Twist *)msgin;
   last_cmd_ms = millis();
   cmd_ang = constrain(msg->angular.z, -MAX_YAW_RATE, MAX_YAW_RATE);    // rad/s, capped
-  cmd_lin = msg->linear.x * (1.0f - 0.5f * fabsf(cmd_ang) / MAX_YAW_RATE);   // m/s, slower in turns
+  cmd_lin = msg->linear.x * (1.0f - TURN_SLOWDOWN * fabsf(cmd_ang) / MAX_YAW_RATE);   // m/s (TURN_SLOWDOWN = 0: unchanged)
 
   // Heading hold only when the sender asks for it (dashboard sets angular.x = 1, Nav2 leaves it 0)
   bool hold_req  = msg->angular.x > 0.5f;
-  bool want_hold = hold_enabled && hold_req && imu_active && fabsf(cmd_ang) < 0.02f && fabsf(cmd_lin) > 0.02f;
+  bool want_hold = hold_enabled && hold_req && imu_ok && fabsf(cmd_ang) < 0.02f && fabsf(cmd_lin) > 0.02f;
   if (want_hold && !hold_active) heading_target = filtered_yaw;
   if (!want_hold) hold_corr = 0.0f;
   hold_active = want_hold;
@@ -359,6 +381,7 @@ static bool tcs_read(uint16_t &r, uint16_t &g, uint16_t &b) {
 }
 
 // ---------- Self-check ----------
+// BLOCKING: takes several seconds (motors, servos, stepper) with no spinning or publishing. Only trigger it while the robot is idle.
 enum { SC_NOT_RUN = 0, SC_PASS = 1, SC_FAIL = 2, SC_UNVERIFIED = 3 };
 enum { SC_MPU, SC_TCS, SC_MOT_FL, SC_MOT_RL, SC_MOT_FR, SC_MOT_RR,
        SC_TILT, SC_DUMP, SC_STEPPER, SC_COUNT };
@@ -412,7 +435,7 @@ static uint8_t test_motor(int in1, int in2, ESP32Encoder &enc) {
   int64_t af = f < 0 ? -f : f, ar = r < 0 ? -r : r;
   bool fok = af >= SC_MIN_COUNTS, rok = ar >= SC_MIN_COUNTS;
   bool dir = (f > 0) != (r > 0);
-  enc.setCount(c0);   // TEMP: encode both legs in the readout
+  enc.setCount(c0);   // restore the count so the test does not disturb odometry
   if (fok && rok && dir) return SC_PASS;
   if (!fok)              return SC_FAIL;
   if (!rok)              return SC_UNVERIFIED;
@@ -460,12 +483,14 @@ static void selfcheck_run() {
 // ---------- micro-ROS connection management ----------
 // Serial link budget: odometry+imu+encoders+color at 20/20/20/10 Hz need about 24 kB/s. 115200 baud carries only
 // 11.5 kB/s, so the link saturates and a ping times out -> the session is dropped and re-created ("random restarts").
-// MICROROS_BAUD must equal the agent's --baudrate (agent: serial --dev /dev/ttyUSBx -b 921600).
+// MICROROS_BAUD must equal the agent's --baudrate (agent: serial --dev /dev/ttyUSBx -b 460800).
 #define MICROROS_BAUD      460800
 #define IMU_ODOM_PUB_DIV   1      // publish imu+odom every N-th 50 ms cycle (1 = 20 Hz). Use >= 4 if you must stay at 115200.
 #define PING_PERIOD_MS     500    // agent liveness check interval
 #define PING_TIMEOUT_MS    200    // per-ping timeout
 #define PING_MAX_FAILS     4      // consecutive failed pings before the session is dropped (about 3 s)
+#define TIME_RETRY_MS      1000   // retry the agent time sync this often until it succeeds
+#define TIME_RESYNC_MS     300000UL // periodic re-sync once running
 enum AgentState { WAITING_AGENT, AGENT_AVAILABLE, AGENT_CONNECTED, AGENT_DISCONNECTED };
 AgentState agent_state = WAITING_AGENT;
 bool hold_sub_ok = false;
@@ -481,7 +506,9 @@ static bool create_entities() {
   RC_OK(rclc_publisher_init_best_effort(&imu_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu), "imu_data"));
   RC_OK(rclc_publisher_init_best_effort(&odom_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry), "odometry/filtered"));
 
+  // Stamped topics stay silent until this succeeds; loop() retries every TIME_RETRY_MS.
   rmw_uros_sync_session(1000);
+  time_synced = rmw_uros_epoch_synchronized();
 
   RC_OK(rclc_subscription_init_default(&twist_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist), "cmd_vel_raw"));
   RC_OK(rclc_subscription_init_default(&pan_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Point), "actuators/tilt_cmd"));
@@ -529,6 +556,7 @@ static void destroy_entities() {
   sc_enabled = false;
   hold_sub_ok = false;
   hold_enabled = true;
+  time_synced = false;
 }
 
 void setup() {
@@ -560,6 +588,7 @@ void setup() {
   if (imuSensor.begin()) {
     imu_active = true;
     imuSensor.calibrateGyro();   // robot must be still (~1.2 s)
+    gz_bias0 = imuSensor.getGyroBiasZ();
     attitudeCalibrate();         // robot must be still and level (~2 s)
     last_filter_us = micros();
   }
@@ -570,7 +599,7 @@ void setup() {
 
   imu_msg.orientation_covariance[0] = 0.01;   // roll: from attitude filter
   imu_msg.orientation_covariance[4] = 0.01;   // pitch: from attitude filter
-  imu_msg.orientation_covariance[8] = 0.1;
+  imu_msg.orientation_covariance[8] = 1e3;    // yaw: gyro-integrated, not an absolute heading, so tell consumers not to trust it
   imu_msg.angular_velocity_covariance[0] = 0.001;
   imu_msg.angular_velocity_covariance[4] = 0.001;
   imu_msg.angular_velocity_covariance[8] = 0.001;
@@ -633,6 +662,17 @@ void loop() {
   const bool connected = (agent_state == AGENT_CONNECTED);
   current_time = millis();
 
+  // 200 Hz IMU sampling; averaged in the 50 ms block below
+  static uint32_t last_fast_us = 0;
+  if (imu_active && (micros() - last_fast_us) >= 5000) {
+    last_fast_us = micros();
+    float v[6];
+    if (imuSensor.readData(v[0], v[1], v[2], v[3], v[4], v[5])) {
+      for (int j = 0; j < 6; j++) imu_acc[j] += v[j];
+      imu_acc_n++;
+    }
+  }
+
   if (run_selfcheck) {
     run_selfcheck = false;
     selfcheck_run();
@@ -644,6 +684,20 @@ void loop() {
     last_speed_ms = current_time;
     if (dt > 0.25f) speed_ctrl_reset();   // first tick after a long block (self-check): just re-sync
     else            speed_ctrl_step(dt);
+  }
+
+  // Time sync: retry until it succeeds, then re-sync periodically. Stamped topics wait for time_synced.
+  static uint32_t last_sync_ms = 0;
+  if (connected && !time_synced) {
+    if (current_time - last_sync_ms >= TIME_RETRY_MS) {
+      last_sync_ms = current_time;
+      rmw_uros_sync_session(200);
+      time_synced = rmw_uros_epoch_synchronized();
+    }
+  } else if (connected && current_time - last_sync_ms >= TIME_RESYNC_MS) {
+    last_sync_ms = current_time;
+    rmw_uros_sync_session(200);
+    time_synced = rmw_uros_epoch_synchronized();
   }
 
   static uint32_t last_sc_pub = 0;
@@ -659,7 +713,7 @@ void loop() {
   }
 
   static uint32_t last_enc_pub = 0;
-  if (connected && current_time - last_enc_pub >= 50) {
+  if (connected && time_synced && current_time - last_enc_pub >= 50) {
     last_enc_pub = current_time;
     enc_msg.data.data[0] = (int32_t)enc_fl.getCount();
     enc_msg.data.data[1] = (int32_t)enc_rl.getCount();
@@ -675,8 +729,17 @@ void loop() {
   if (current_time - last_imu_pub >= 50) {
     last_imu_pub = current_time;
 
-    float ax, ay, az, gx, gy, gz;
-    if (imu_active && imuSensor.readData(ax, ay, az, gx, gy, gz)) {
+    float ax = 0, ay = 0, az = 0, gx = 0, gy = 0, gz = 0;
+    imu_ok = imu_active && imu_acc_n > 0;
+    if (imu_ok) {
+      float inv = 1.0f / imu_acc_n;
+      ax = imu_acc[0] * inv; ay = imu_acc[1] * inv; az = imu_acc[2] * inv;
+      gx = imu_acc[3] * inv; gy = imu_acc[4] * inv; gz = imu_acc[5] * inv;
+    }
+    for (int j = 0; j < 6; j++) imu_acc[j] = 0.0f;
+    imu_acc_n = 0;
+    if (!imu_ok) { ax = ay = az = gx = gy = gz = 0.0f; }   // estimator keeps running on the encoders alone
+    {
       // Sensor frame is standard FLU (x fwd, y left, z up): no axis flips.
 
       uint32_t now_us = micros();
@@ -687,23 +750,32 @@ void loop() {
 
         // Roll/pitch filter + ramp flag. Runs on the driver-corrected gz,
         // before ZUPT/deadband modify it.
-        att.update(ax, ay, az, gx, gy, gz, dt);
+        if (imu_ok) att.update(ax, ay, az, gx, gy, gz, dt);
 
-        // --- Zero Velocity Update ---
+        // --- Zero Velocity Update + gyro bias learning ---
         static uint32_t still_since = 0;
-        bool still = fabsf(cmd_lin) < 0.003f && fabsf(cmd_ang) < 0.01f;   // m/s, rad/s (lowest moving command is about 0.0017 m/s)
-        if (still) {
-          if (still_since == 0) still_since = current_time;
-          if (current_time - still_since > 1000 && fabsf(gz) < 0.05f) {
-            float current_bias = imuSensor.getGyroBiasZ();
-            imuSensor.updateGyroBiasZ(current_bias + (0.02f * gz));
-            gz -= (0.02f * gz); // Apply instantly to this tick
-          }
-        } else {
-          still_since = 0;
+        bool still    = fabsf(cmd_lin) < 0.003f && fabsf(cmd_ang) < 0.01f;   // m/s, rad/s (lowest moving command is about 0.0017 m/s)
+        bool straight = !still && fabsf(cmd_ang) < 0.01f;                    // driving, no turn commanded
+        if (still) { if (still_since == 0) still_since = current_time; }
+        else       { still_since = 0; }
+
+        // Standing still: unclamped learning like the original, wide gate so a bad boot calibration can recover.
+        // Driving straight: slow learning, gated tightly and clamped around the boot calibration.
+        float k_b = 0.0f;
+        bool  clamp_b = false;
+        if (imu_ok) {
+          if (still && current_time - still_since > 1000 && fabsf(gz) < 0.15f) { k_b = 0.02f; }
+          else if (straight && fabsf(gz) < 0.05f)                              { k_b = 0.001f; clamp_b = true; }
+        }
+        if (k_b > 0.0f) {
+          float b = imuSensor.getGyroBiasZ() + k_b * gz;
+          if (clamp_b) b = constrain(b, gz_bias0 - 0.01f, gz_bias0 + 0.01f);  // +-0.01 rad/s around the boot calibration
+          imuSensor.updateGyroBiasZ(b);
+          gz -= k_b * gz;                                                     // apply instantly to this tick
         }
 
-        if (fabsf(gz) < 0.005f) gz = 0.0f;
+        // Deadband only while no turn is commanded (small real turn rates must pass otherwise)
+        if (fabsf(cmd_ang) < 0.01f && fabsf(gz) < 0.005f) gz = 0.0f;
 
         // --- EKF Update Process (4-State) ---
         int32_t enc_l = (S_FL * enc_fl.getCount() + S_RL * enc_rl.getCount()) / 2;
@@ -715,11 +787,12 @@ void loop() {
         last_enc_r = enc_r;
 
         float d_center = (d_left + d_right) / 2.0f;
-        float v_enc = d_center / dt;
-        float d_theta_enc = (d_right - d_left) / TRACK_WIDTH;
+        float v_enc = d_center / dt;   // yaw from the encoders is deliberately not used (skid steer under-reads turns)
 
         // Gravity-compensated forward accel in m/s^2 (gain-corrected, pitch-compensated)
-        float accel_forward = att.forwardAccel();
+        // No IMU: yaw rate from the encoders using the effective track (skid steer under-reads with the geometric one), no accelerometer.
+        if (!imu_ok) gz = (d_right - d_left) / TRACK_CMD / dt;
+        float accel_forward = imu_ok ? att.forwardAccel() : 0.0f;
 
         // 1. Prediction Step
         float v_pred = X(3) + (accel_forward * dt);
@@ -744,42 +817,26 @@ void loop() {
         };
 
         P = F * P * ~F + Q;
+        if (!imu_ok) P(2, 2) += 1e-4f;   // encoder yaw is much worse than the gyro: grow yaw covariance faster (my estimate, tune it)
 
-        // 3. Measurement Update
-        BLA::Matrix<4> Z = { X(0), X(1), X(2) - (gz * dt) + d_theta_enc, v_enc };
-        BLA::Matrix<4, 4> H = {
-            1.0f, 0.0f, 0.0f, 0.0f,
-            0.0f, 1.0f, 0.0f, 0.0f,
-            0.0f, 0.0f, 1.0f, 0.0f,
-            0.0f, 0.0f, 0.0f, 1.0f
-        };
+        // 3. Measurement update: encoder forward velocity only, H = [0 0 0 1].
+        // Scalar update, so no 4x4 inverse. x, y, theta covariance keeps growing between updates (honest dead reckoning).
+        float y_v = v_enc - X(3);
+        float S_v = P(3, 3) + R(3, 3);
+        float k[4] = {P(0, 3) / S_v, P(1, 3) / S_v, P(2, 3) / S_v, P(3, 3) / S_v};
+        for (int i = 0; i < 4; i++) X(i) += k[i] * y_v;
+        BLA::Matrix<4, 4> Pn = P;
+        for (int i = 0; i < 4; i++)
+          for (int j = 0; j < 4; j++) Pn(i, j) = P(i, j) - k[i] * P(3, j);
+        P = Pn;
 
-        BLA::Matrix<4> Y = Z - (H * X);
-        while (Y(2) > PI)  Y(2) -= 2.0f * PI;
-        while (Y(2) < -PI) Y(2) += 2.0f * PI;
-        Y(2) = 0.0f;   // yaw from the gyro only: skid-steer encoders under-read turns and would bias the heading
-
-        // Consistency gate: skid-steer encoders can under-read yaw but cannot honestly over-read it.
-        // If the encoder heading change exceeds what the gyro allows, the wheels are slipping or off the
-        // ground (e.g. on a test rig), so ignore the encoder heading for this tick.
-        BLA::Matrix<4, 4> Rk = R;
-        if (fabsf(d_theta_enc) > 1.2f * fabsf(gz * dt) + 0.002f) Rk(2, 2) = 1e3f;
-        BLA::Matrix<4, 4> S = H * P * ~H + Rk;
-        BLA::Matrix<4, 4> K = P * ~H * Inverse(S);
-
-        X += K * Y;
         while (X(2) > PI)  X(2) -= 2.0f * PI;
         while (X(2) < -PI) X(2) += 2.0f * PI;
-
-        BLA::Matrix<4, 4> I = {1.0f,0.0f,0.0f,0.0f,
-                               0.0f,1.0f,0.0f,0.0f,
-                               0.0f,0.0f,1.0f,0.0f,
-                               0.0f,0.0f,0.0f,1.0f};
-        P = (I - K * H) * P;
 
         filtered_yaw = X(2);
 
         // --- Heading Hold Control ---
+        if (!imu_ok && hold_active) { hold_active = false; hold_corr = 0.0f; apply_drive(); }   // no gyro, no heading hold
         if (hold_active && (current_time - last_cmd_ms <= CMD_TIMEOUT_MS)) {
           float err = heading_target - filtered_yaw;
           while (err >  PI) err -= 2.0f * PI;
@@ -839,9 +896,9 @@ void loop() {
         odom_msg.twist.covariance[7]  = odom_msg.twist.covariance[14] = odom_msg.twist.covariance[21] = odom_msg.twist.covariance[28] = 1e6;
 
         static uint8_t pub_cnt = 0;
-        if (connected && (++pub_cnt >= IMU_ODOM_PUB_DIV)) {
+        if (connected && time_synced && (++pub_cnt >= IMU_ODOM_PUB_DIV)) {
             pub_cnt = 0;
-            RCSOFTCHECK(rcl_publish(&imu_pub, &imu_msg, NULL));
+            if (imu_ok) { RCSOFTCHECK(rcl_publish(&imu_pub, &imu_msg, NULL)); }   // never publish stale IMU data
             RCSOFTCHECK(rcl_publish(&odom_pub, &odom_msg, NULL));
         }
       }
@@ -861,12 +918,6 @@ void loop() {
         RCSOFTCHECK(rcl_publish(&color_pub, &color_msg, NULL));
       }
     }
-  }
-
-  static uint32_t last_sync_ms = 0;
-  if (connected && current_time - last_sync_ms >= 300000UL) {
-    last_sync_ms = current_time;
-    rmw_uros_sync_session(200);
   }
 
   static bool is_stopped = false;

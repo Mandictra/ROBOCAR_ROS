@@ -224,8 +224,8 @@
                 <div class="field">
                     <div class="field-head"><span>Dump bin</span></div>
                     <div class="row">
-                        <button class="btn btn-primary" onclick="setDump(175)">Dump trash</button>
-                        <button class="btn" onclick="setDump(5)">Reset bin</button>
+                        <button class="btn btn-primary" onclick="setDump(165)">Dump trash</button>
+                        <button class="btn" onclick="setDump(15)">Reset bin</button>
                     </div>
                 </div>
 
@@ -254,10 +254,10 @@
                             </div>
                             <div class="heading-vals">
                                 <div class="tile"><span class="lbl">Yaw (°)</span><span id="imu-yaw" class="data-val">0.0</span></div>
-                                <div class="tile"><span class="lbl">Gyro Z (°/s)</span><span id="imu-gz" class="data-val">0.0</span></div>
+                                <div class="tile stale" id="tile-gz"><span class="lbl">Gyro Z (°/s)</span><span id="imu-gz" class="data-val">0.0</span></div>
                             </div>
                         </div>
-                        <p class="hint">0° is the heading at power-on.  EKF yaw (gyro + encoders)., so it drifts slowly.</p>
+                        <p class="hint">0° is the heading at power-on. Yaw is read from /odometry/filtered, so it follows whichever EKF is running and drifts slowly.</p>
                     </div>
 
                     <div id="grp-enc" class="stale">
@@ -354,12 +354,23 @@
             });
         }
 
+        var lastSeen = {};
+        var STALE_MS = 1500;   // a group greys out when its topic has been silent this long
         function setStale(ids, on) {
-            ids.forEach(function (id) { document.getElementById(id).classList.toggle('stale', on); });
+            ids.forEach(function (id) {
+                if (!on) lastSeen[id] = performance.now();
+                document.getElementById(id).classList.toggle('stale', on);
+            });
         }
+        setInterval(function () {
+            var now = performance.now();
+            Object.keys(lastSeen).forEach(function (id) {
+                if (now - lastSeen[id] > STALE_MS) document.getElementById(id).classList.add('stale');
+            });
+        }, 500);
 
         function markTelemetryStale() {
-            setStale(['grp-heading', 'grp-enc', 'grp-accel', 'grp-color','grp-att'], true);
+            setStale(['grp-heading', 'grp-enc', 'grp-accel', 'grp-color', 'grp-att', 'tile-gz'], true);
         }
 
         function attachTopics() {
@@ -379,24 +390,35 @@
                 document.getElementById('imu-y').innerText = m.linear_acceleration.y.toFixed(2);
                 document.getElementById('imu-z').innerText = m.linear_acceleration.z.toFixed(2);
 
-                var q = m.orientation;
-                var yaw = Math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z));
-                var yawDeg = yaw * 180 / Math.PI;
-                document.getElementById('imu-yaw').innerText = yawDeg.toFixed(1);
                 document.getElementById('imu-gz').innerText = (m.angular_velocity.z * 180 / Math.PI).toFixed(2);
-                var roll  = Math.atan2(2 * (q.w * q.x + q.y * q.z), 1 - 2 * (q.x * q.x + q.y * q.y)) * 180 / Math.PI;
-                var pitch = Math.asin(Math.max(-1, Math.min(1, 2 * (q.w * q.y - q.z * q.x)))) * 180 / Math.PI;
                 var a = m.linear_acceleration;
-                document.getElementById('imu-roll').innerText = roll.toFixed(1);
-                document.getElementById('imu-pitch').innerText = pitch.toFixed(1);
                 document.getElementById('imu-amag').innerText = Math.sqrt(a.x*a.x + a.y*a.y + a.z*a.z).toFixed(2);
-                setStale(['grp-att'], false);
-                // Positive yaw is counter-clockwise; CSS rotate() is clockwise
-                document.getElementById('dial-arrow').style.transform = 'rotate(' + (-yawDeg) + 'deg)';
-                setStale(['grp-heading', 'grp-accel'], false);
+                // Roll and pitch need orientation. The RPi5-fusion firmware can mark it "not provided" (covariance[0] == -1).
+                var haveOri = !(m.orientation_covariance && m.orientation_covariance[0] === -1);
+                if (haveOri) {
+                    var q = m.orientation;
+                    var roll  = Math.atan2(2 * (q.w * q.x + q.y * q.z), 1 - 2 * (q.x * q.x + q.y * q.y)) * 180 / Math.PI;
+                    var pitch = Math.asin(Math.max(-1, Math.min(1, 2 * (q.w * q.y - q.z * q.x)))) * 180 / Math.PI;
+                    document.getElementById('imu-roll').innerText = roll.toFixed(1);
+                    document.getElementById('imu-pitch').innerText = pitch.toFixed(1);
+                } else {
+                    document.getElementById('imu-roll').innerText = '--';
+                    document.getElementById('imu-pitch').innerText = '--';
+                }
+                setStale(['grp-att', 'grp-accel', 'tile-gz'], false);
             });
 
-            var colorListener = new ROSLIB.Topic({ ros: ros, name: '/sensors/color_rgb', messageType: 'geometry_msgs/msg/Vector3' });
+            var odomListener = new ROSLIB.Topic({ ros: ros, name: '/odometry/filtered', messageType: 'nav_msgs/msg/Odometry' });
+            odomListener.subscribe(function (m) {
+                var q = m.pose.pose.orientation;
+                var yawDeg = Math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z)) * 180 / Math.PI;
+                document.getElementById('imu-yaw').innerText = yawDeg.toFixed(1);
+                // Positive yaw is counter-clockwise; CSS rotate() is clockwise
+                document.getElementById('dial-arrow').style.transform = 'rotate(' + (-yawDeg) + 'deg)';
+                setStale(['grp-heading'], false);
+            });
+
+            var colorListener = new ROSLIB.Topic({ ros: ros, name: '/sensors/color/rgb', messageType: 'geometry_msgs/msg/Vector3' });
             colorListener.subscribe(function (m) {
                 document.getElementById('col-r').innerText = Math.round(m.x);
                 document.getElementById('col-g').innerText = Math.round(m.y);
@@ -422,12 +444,13 @@
         }
 
         // ---- Self-check ----
+        // Order must match the firmware enum: MPU, TCS, MOT_FL, MOT_RL, MOT_FR, MOT_RR, TILT, DUMP, STEPPER
         var SC_NAMES = ['MPU6050 IMU', 'TCS34725 colour', 'Motor FL', 'Motor RL', 'Motor FR', 'Motor RR',
-                        'Pan servo', 'Tilt servo', 'Dump servo', 'Conveyor stepper'];
+                        'Tilt servo', 'Dump servo', 'Conveyor stepper'];
         var SC_GROUPS = [
             { title: 'Sensors', items: [0, 1] },
             { title: 'Drive motors', items: [2, 3, 4, 5] },
-            { title: 'Actuators', items: [6, 7, 8, 9] }
+            { title: 'Actuators', items: [6, 7, 8] }
         ];
         var SC_LABELS = ['Not run', 'Pass', 'Fail', 'Ran, check by eye'];
         var SC_CLASSES = ['sc-none', 'sc-pass', 'sc-fail', 'sc-warn'];
@@ -743,8 +766,8 @@
         }
 
         var GP_ACTIONS = {
-            dump:      function () { setDump(175); },
-            resetBin:  function () { setDump(5); },
+            dump:      function () { setDump(165); },
+            resetBin:  function () { setDump(15); },
             centerCam: function () { centerCamera(); },
             speedUp:   function () { gpStepSpeed(0.1); },
             speedDown: function () { gpStepSpeed(-0.1); },
@@ -882,15 +905,15 @@
                 } };
             }
             cmdVel = fake('/cmd_vel_teleop');
-            panTiltCmd = fake('/pan_tilt_cmd');
-            dumpCmd = fake('/dump_cmd');
-            convCmd = fake('/conveyor_cmd');
+            panTiltCmd = fake('/actuators/tilt_cmd');
+            dumpCmd = fake('/actuators/dump_cmd');
+            convCmd = fake('/actuators/conveyor_cmd');
             
             dbg.textContent = 'DEBUG: no robot, commands are logged here\n';
         }
 
         updateMaxSpeed(document.getElementById('speed-slider').value);
-        renderSelfCheck([0, 0, 0, 0, 0, 0, 0, 0, 0, 0], false);
+        renderSelfCheck([0, 0, 0, 0, 0, 0, 0, 0, 0], false);
         connect();
     </script>
 </body>
