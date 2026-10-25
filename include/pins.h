@@ -8,8 +8,8 @@
 // ------- MOTOR FL
 #define FL_IN1 13
 #define FL_IN2 14
-#define ENC_FL_A 46   // Swapped A/B to fix negative reading
-#define ENC_FL_B 8    // GPIO46: strapping pin on the ESP32-S3
+#define ENC_FL_A 46   // A/B swapped so the count rises when the wheel rolls forward (GPIO46 is a strapping pin, verified OK)
+#define ENC_FL_B 8
 
 // ------- MOTOR FR
 #define FR_IN1 9
@@ -20,7 +20,7 @@
 // ------- MOTOR RL
 #define RL_IN1 4
 #define RL_IN2 5
-#define ENC_RL_A 17   // Hardware check required: read 0 during test
+#define ENC_RL_A 17
 #define ENC_RL_B 18
 
 // ------- MOTOR RR
@@ -41,20 +41,20 @@
 #define CONV_IN3 2
 #define CONV_IN4 1
 
-// ---------- Servo Actuators ----------
-#define PAN_PIN   47
-#define TILT_PIN  21
-#define DUMP_PIN  48
+// ---------- Servo Actuators (all on a PCA9685 over I2C, no direct servo pins any more) ----------
+
+#define PCA_ADDR  0x40   // PCA9685 I2C address (default, all address jumpers open)
+#define CH_PAN    0      // continuous-rotation servo: speed command, no angle
+#define CH_TILT   1      // positional servo
+#define CH_DUMP   2      // positional servo
 
 // ---------- Sensors ----------
 
-// ---------- I2C Bus (Shared by Color Sensor & IMU) ----------
-#define I2C_SDA  38// Add your SDA pin number here
-#define I2C_SCL  39// Add your SCL pin number here
+// ---------- I2C Bus (Shared by Color Sensor, IMU and PCA9685) ----------
+#define I2C_SDA  38
+#define I2C_SCL  39
 
 // ---------- Limits ----------
-#define PAN_MIN   0
-#define PAN_MAX   180
 #define TILT_MIN  30
 #define TILT_MAX  150
 #define CMD_TIMEOUT_MS  500

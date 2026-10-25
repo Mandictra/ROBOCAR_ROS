@@ -17,7 +17,6 @@
 #include <sensor_msgs/msg/imu.h>
 #include <nav_msgs/msg/odometry.h>
 
-#include <ESP32Servo.h>
 #include <ESP32Encoder.h>
 #include <AccelStepper.h>
 #include <Wire.h>
@@ -42,8 +41,10 @@ using namespace BLA;
 //   self_check           std_msgs/Int32             1 Hz  2 bits per item (0 not run, 1 pass, 2 fail, 3 check by eye), bit 30 = run toggle
 // Subscribed by the ESP32 (default reliable QoS):
 //   cmd_vel_raw          geometry_msgs/Twist       drive command in m/s and rad/s (from twist_mux); angular.x > 0.5 asks for heading hold
-//   actuators/tilt_cmd   geometry_msgs/Point       y = tilt servo angle in degrees (x is ignored, there is no pan servo)
-//   actuators/dump_cmd   std_msgs/Float32          dump servo angle, 15..165 degrees
+//   actuators/pan_cmd    std_msgs/Float32          pan SPEED -1..1 (continuous-rotation servo, PCA9685 channel 0); keep publishing,
+//                                                  it stops CMD_TIMEOUT_MS after the last non-zero command
+//   actuators/tilt_cmd   geometry_msgs/Point       y = tilt servo angle in degrees (x is ignored; PCA9685 channel 1)
+//   actuators/dump_cmd   std_msgs/Float32          dump servo angle, 15..165 degrees (PCA9685 channel 2)
 //   actuators/conveyor_cmd std_msgs/Float32        conveyor stepper speed in steps/s (+-700)
 //   self_check_cmd       std_msgs/Int32            any message starts the self-check (ignored while driving)
 //   heading_hold_cmd     std_msgs/Bool             master switch for heading hold (true again after every agent reconnect)
@@ -53,7 +54,7 @@ using namespace BLA;
 
 // ---------- Robot Kinematics (Tune these in meters) ----------
 const float WHEEL_RADIUS = 0.0381f; // 76.2 mm wheel diameter (verified by distance test)
-const float TRACK_WIDTH = 0.215f;
+const float TRACK_WIDTH = 0.215f;   // geometric track, informational only (turn commands and encoder yaw use TRACK_CMD)
 const float TICKS_PER_REV = 748.0f; // Half-quad counts per wheel rev
 const float M_PER_TICK = (2.0f * PI * WHEEL_RADIUS) / TICKS_PER_REV;
 
@@ -67,6 +68,11 @@ const float MAX_WHEEL_SPEED = MAX_WHEEL_RPM / 60.0f * WHEEL_CIRC;  // 0.479 m/s 
 // Effective track for turn commands. Skid steer turns as if the track were wider than the geometric 0.215 m (TRACK_WIDTH).
 // Tune: command 1.0 rad/s, read /imu_data angular_velocity.z, TRACK_CMD_new = TRACK_CMD * 1.0 / measured.
 const float TRACK_CMD = 0.30f;
+// Straight-line trim (1/m). Measured veer to the LEFT of 0.0032 rad/s at 0.23 m/s -> 0.0032/0.23 = 0.0139 1/m.
+// Added as a yaw-rate correction proportional to forward speed: w -= STRAIGHT_TRIM * cmd_lin (works forward and reverse).
+// Tune: drive 3 m straight at normal speed; still veers LEFT -> increase it, veers RIGHT -> decrease it, straight -> done. 0 = off.
+// (Only the no-IMU fallback yaw is slightly affected: its encoder yaw then reads this deliberate wheel difference.)
+const float STRAIGHT_TRIM = 0.0139f;
 // Cap on the commanded turn rate. Keeps lidar scans clean for SLAM; keep dashboard WMAX and Nav2 max angular <= this.
 const float MAX_YAW_RATE = 2.0f;   // rad/s
 // Fraction of linear speed removed at full turn rate. 0 = pass cmd_vel through unchanged (right for Nav2, so its
@@ -90,10 +96,10 @@ BLA::Matrix<4, 4> P = {1.0f, 0.0f, 0.0f, 0.0f,
                        0.0f, 0.0f, 1.0f, 0.0f,
                        0.0f, 0.0f, 0.0f, 1.0f}; // Covariance Matrix
 
-// Process noise per 50 ms step. Q(2,2) = 1e-5 is my estimate for gyro-integrated yaw (the old 0.005 was far too pessimistic):
+// Process noise per 50 ms step. Q(0,0)/Q(1,1) = 1e-6 (~1 mm/step; position is integrated from the fused velocity). Q(2,2) = 1e-5 is my estimate for gyro-integrated yaw (the old 0.005 was far too pessimistic):
 // tune it against measured yaw drift, e.g. a 10 minute still test and a few full-lap runs.
-BLA::Matrix<4, 4> Q = {0.001f, 0.0f,   0.0f,   0.0f,
-                       0.0f,   0.001f, 0.0f,   0.0f,
+BLA::Matrix<4, 4> Q = {1e-6f,  0.0f,   0.0f,   0.0f,
+                       0.0f,   1e-6f,  0.0f,   0.0f,
                        0.0f,   0.0f,   1e-5f,  0.0f,
                        0.0f,   0.0f,   0.0f,   0.05f}; // Process Noise (Gyro & Accel trust)
 
@@ -107,7 +113,6 @@ int32_t last_enc_l = 0;
 int32_t last_enc_r = 0;
 
 // ---------- Hardware Instances ----------
-Servo tilt_servo, dump_servo;
 ESP32Encoder enc_fl, enc_fr, enc_rl, enc_rr;
 AccelStepper conveyorStepper(AccelStepper::FULL4WIRE, CONV_IN1, CONV_IN3, CONV_IN2, CONV_IN4);
 Adafruit_TCS34725 tcs = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_50MS, TCS34725_GAIN_4X);
@@ -119,10 +124,107 @@ static float    imu_acc[6] = {0, 0, 0, 0, 0, 0};   // ax ay az gx gy gz sums
 static uint16_t imu_acc_n  = 0;
 float gz_bias0 = 0.0f;                              // boot-calibrated gyro z bias, centre of the clamp used while driving
 
-#define SERVO_MIN_PULSE_US 500
-#define SERVO_MAX_PULSE_US 2400
-
 const int TCS_ADDR = 0x29;
+
+// ---------- Servos on a PCA9685 (I2C 0x40, shares the bus with the IMU and colour sensor) ----------
+// All PCA9685 access happens on core 1 (process_commands / selfcheck / setup). The micro-ROS core never touches Wire.
+#define PCA_FREQ_HZ   50
+// Absolute safety clamp for any pulse. The real per-servo limits are the SERVO_CAL table below (found with `find` in
+// pca_serial_test.cpp); this only stops a typo in that table from sending a wild pulse.
+#define SERVO_MIN_US  500
+#define SERVO_MAX_US  2650   // must be >= the largest us in SERVO_CAL (dump uses 2600), or that end gets clipped
+#define PCA_REG_MODE1      0x00
+#define PCA_REG_LED0_ON_L  0x06
+#define PCA_REG_PRESCALE   0xFE
+
+static bool pca_ok = false;
+
+static bool pca_write8(uint8_t reg, uint8_t val) {
+  Wire.beginTransmission(PCA_ADDR);
+  Wire.write(reg); Wire.write(val);
+  return Wire.endTransmission() == 0;
+}
+
+static bool pca_read8(uint8_t reg, uint8_t &val) {
+  Wire.beginTransmission(PCA_ADDR);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom((int)PCA_ADDR, 1) != 1) return false;
+  val = Wire.read();
+  return true;
+}
+
+// Sets 50 Hz and auto-increment. Takes about 1 ms. The internal oscillator is only about +-5 % accurate.
+static bool pca_init() {
+  uint8_t prescale = (uint8_t)(25000000.0f / (4096.0f * PCA_FREQ_HZ) + 0.5f) - 1;   // 121
+  if (!pca_write8(PCA_REG_MODE1, 0x10)) return false;       // sleep (prescale is writable only while asleep)
+  if (!pca_write8(PCA_REG_PRESCALE, prescale)) return false;
+  if (!pca_write8(PCA_REG_MODE1, 0x00)) return false;       // wake
+  delayMicroseconds(500);                                   // oscillator settle time
+  if (!pca_write8(PCA_REG_MODE1, 0xA0)) return false;       // restart + auto-increment
+  uint8_t m = 0;
+  return pca_read8(PCA_REG_MODE1, m) && (m & 0x20);
+}
+
+static bool pca_set_us(uint8_t ch, float us) {
+  us = constrain(us, (float)SERVO_MIN_US, (float)SERVO_MAX_US);
+  uint16_t off = (uint16_t)(us * 4096.0f * PCA_FREQ_HZ / 1e6f + 0.5f);
+  Wire.beginTransmission(PCA_ADDR);
+  Wire.write(PCA_REG_LED0_ON_L + 4 * ch);
+  Wire.write(0); Wire.write(0);
+  Wire.write(off & 0xFF); Wire.write(off >> 8);
+  return Wire.endTransmission() == 0;
+}
+
+// Per-channel calibration: two reference points, command angle -> measured pulse. Angles in between are linearly
+// interpolated; angles outside the two points are clamped to them, so a servo is never driven past its calibrated ends.
+// The values below are PLACEHOLDERS: fill them from `find <ch>` in pca_serial_test.cpp, one servo at a time.
+// If a servo turns the wrong way, swap its two us values. The command ranges (tilt 30..150, dump 15..165) stay as they were.
+struct ServoCal { float deg0, us0, deg1, us1; };
+static const ServoCal SERVO_CAL[3] = {
+  {   0, 1000, 180, 2000 },   // CH_PAN unused: continuous-rotation servo, see pan_set_speed()
+  {   0, 1602, 180, 2602 },   // CH_TILT  FINAL (measured). Commands are still limited to TILT_MIN..TILT_MAX (30..150 deg)
+  {   0,  700, 180, 2600 },   // CH_DUMP  FINAL (measured), do not change. Commands are still limited to 15..165 deg
+};
+
+// Angle in degrees on a PCA9685 channel, interpolated through SERVO_CAL. Re-initialises the chip if it dropped off the bus.
+static void servo_write(uint8_t ch, float deg) {
+  if (ch == CH_PAN || ch >= 3) return;   // pan is continuous rotation: use pan_set_speed()
+  if (!pca_ok && !(pca_ok = pca_init())) return;
+  const ServoCal &c = SERVO_CAL[ch];
+  float t = constrain((deg - c.deg0) / (c.deg1 - c.deg0), 0.0f, 1.0f);
+  if (!pca_set_us(ch, c.us0 + t * (c.us1 - c.us0))) pca_ok = false;
+}
+
+// ---------- Pan: continuous-rotation servo (SG90 360), PCA9685 channel 0 ----------
+// A continuous-rotation servo has no angle: the pulse sets speed and direction around a stop pulse, and nothing reports
+// position. So pan is a speed command (-1..1), not part of SERVO_CAL. The sender must keep publishing while it wants
+// motion: pan stops by itself CMD_TIMEOUT_MS after the last non-zero command (checked in loop()).
+#define PAN_STOP_US   1500   // pulse where it should stand still
+#define PAN_RANGE_US  400    // offset from PAN_STOP_US at |speed| = 1. Tune: CR servos saturate somewhere around +-300..500 us
+#define PAN_DIR       1      // -1 reverses the direction
+#define PAN_DEADBAND  0.05f  // |speed| below this = stop
+
+static uint32_t pan_last_ms = 0;
+static bool pan_active = false;
+
+// Full-off bit: no pulses at all on the channel. A CR servo gets no signal, so it cannot creep from a badly trimmed stop pulse.
+static bool pca_channel_off(uint8_t ch) {
+  Wire.beginTransmission(PCA_ADDR);
+  Wire.write(PCA_REG_LED0_ON_L + 4 * ch);
+  Wire.write(0); Wire.write(0); Wire.write(0); Wire.write(0x10);
+  return Wire.endTransmission() == 0;
+}
+
+static void pan_set_speed(float s) {
+  s = constrain(s, -1.0f, 1.0f) * PAN_DIR;
+  bool moving = fabsf(s) >= PAN_DEADBAND;
+  pan_active = moving;                         // set before any I2C so a dead bus cannot make loop() retry every pass
+  if (moving) pan_last_ms = millis();
+  if (!pca_ok && !(pca_ok = pca_init())) return;
+  bool ok = moving ? pca_set_us(CH_PAN, PAN_STOP_US + s * PAN_RANGE_US) : pca_channel_off(CH_PAN);
+  if (!ok) pca_ok = false;
+}
 
 // Average ~2 s of still samples and calibrate the attitude filter.
 // Call after imuSensor.calibrateGyro() with the robot stationary on level ground.
@@ -152,7 +254,9 @@ rclc_executor_t executor;
 rcl_subscription_t twist_sub;
 geometry_msgs__msg__Twist twist_msg;
 rcl_subscription_t pan_sub;
-geometry_msgs__msg__Point pan_msg;
+std_msgs__msg__Float32 pan_msg;
+rcl_subscription_t tilt_sub;
+geometry_msgs__msg__Point tilt_msg;
 rcl_subscription_t dump_sub;
 std_msgs__msg__Float32 dump_msg;
 rcl_subscription_t conv_sub;
@@ -210,6 +314,38 @@ bool hold_enabled = true;
 
 #define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){while(1){delay(100);}}}
 #define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){}}
+
+// =========================================================================================
+// DUAL-CORE SPLIT (why the robot no longer stalls when the Pi / network lags)
+//   core 1 (Arduino loop):  IMU sampling, wheel PI loops, EKF, heading hold, command watchdog. NEVER touches micro-ROS.
+//   core 0 (uros_task):     agent ping / connect, executor spin, time sync, ALL publishing. May block as long as it likes.
+// They only exchange data through two tiny structs guarded by a spinlock:
+//   snap    control -> comms   latest sample wins; if comms is slow, old samples are overwritten, never queued
+//   cmdbox  comms -> control   subscription callbacks only store the command; the control core applies it
+// A stalled serial link / agent / Pi therefore cannot delay the motor control, the odometry or the CMD_TIMEOUT stop.
+// =========================================================================================
+#include "esp_timer.h"
+static portMUX_TYPE ipc_mux = portMUX_INITIALIZER_UNLOCKED;
+
+struct Snapshot {
+  bool enc_new = false, imu_new = false, odom_new = false, color_new = false;
+  int64_t stamp_us = 0;                         // esp_timer_get_time() when the sample was taken (converted to epoch by the comms core)
+  int32_t ticks[4] = {0, 0, 0, 0};              // FL, RL, FR, RR
+  float lax = 0, lay = 0, laz = 0, avx = 0, avy = 0, avz = 0;
+  float qw = 1, qx = 0, qy = 0, qz = 0;         // IMU orientation (roll/pitch from the attitude filter, yaw from the EKF)
+  float ox = 0, oy = 0, oqz = 0, oqw = 1, ovx = 0, owz = 0;   // odometry pose / velocity
+  float p00 = 0, p01 = 0, p11 = 0, p22 = 0, p33 = 0;          // covariance entries
+  float cr = 0, cg = 0, cb = 0;                 // colour sensor
+};
+static Snapshot snap;
+
+struct CmdBox {
+  bool  twist_new = false, pan_new = false, tilt_new = false, dump_new = false, conv_new = false, hold_new = false;
+  float lin_x = 0, ang_z = 0; bool hold_req = false;
+  float pan = 0, tilt = 90, dump = 15, conv = 0; bool hold_en = true;
+};
+static CmdBox cmdbox;
+static volatile bool sc_publish_req = false;   // set by the control core, serviced by the comms core
 
 // ---------- Motor Control ----------
 #define MOTOR_MIN_PWM 150
@@ -318,7 +454,7 @@ void drive_motors(float left_speed, float right_speed) {
 
 // ---------- ROS 2 Callbacks ----------
 static void apply_drive() {
-  float w  = cmd_ang + hold_corr;                 // rad/s
+  float w  = cmd_ang + hold_corr - STRAIGHT_TRIM * cmd_lin;   // rad/s (trim cancels the robot's natural left veer)
   float vl = cmd_lin - w * TRACK_CMD * 0.5f;      // m/s
   float vr = cmd_lin + w * TRACK_CMD * 0.5f;
   float m  = fmaxf(fabsf(vl), fabsf(vr));
@@ -326,14 +462,13 @@ static void apply_drive() {
   drive_motors(vl / MAX_WHEEL_SPEED, vr / MAX_WHEEL_SPEED);
 }
 
-void twist_callback(const void * msgin) {
-  const geometry_msgs__msg__Twist * msg = (const geometry_msgs__msg__Twist *)msgin;
+// Applies one command on the control core (the original twist_callback body).
+static void handle_twist(float lin_x, float ang_z, bool hold_req) {
   last_cmd_ms = millis();
-  cmd_ang = constrain(msg->angular.z, -MAX_YAW_RATE, MAX_YAW_RATE);    // rad/s, capped
-  cmd_lin = msg->linear.x * (1.0f - TURN_SLOWDOWN * fabsf(cmd_ang) / MAX_YAW_RATE);   // m/s (TURN_SLOWDOWN = 0: unchanged)
+  cmd_ang = constrain(ang_z, -MAX_YAW_RATE, MAX_YAW_RATE);    // rad/s, capped
+  cmd_lin = lin_x * (1.0f - TURN_SLOWDOWN * fabsf(cmd_ang) / MAX_YAW_RATE);   // m/s (TURN_SLOWDOWN = 0: unchanged)
 
   // Heading hold only when the sender asks for it (dashboard sets angular.x = 1, Nav2 leaves it 0)
-  bool hold_req  = msg->angular.x > 0.5f;
   bool want_hold = hold_enabled && hold_req && imu_ok && fabsf(cmd_ang) < 0.02f && fabsf(cmd_lin) > 0.02f;
   if (want_hold && !hold_active) heading_target = filtered_yaw;
   if (!want_hold) hold_corr = 0.0f;
@@ -342,28 +477,54 @@ void twist_callback(const void * msgin) {
   apply_drive();
 }
 
+// Control core: pick up whatever the callbacks stored and apply it.
+static void process_commands() {
+  CmdBox c;
+  portENTER_CRITICAL(&ipc_mux);
+  c = cmdbox;
+  cmdbox.twist_new = cmdbox.pan_new = cmdbox.tilt_new = cmdbox.dump_new = cmdbox.conv_new = cmdbox.hold_new = false;
+  portEXIT_CRITICAL(&ipc_mux);
+
+  if (c.hold_new) { hold_enabled = c.hold_en; if (!hold_enabled) { hold_active = false; hold_corr = 0.0f; } }
+  if (c.pan_new)  pan_set_speed(c.pan);   // -1..1 speed, not an angle
+  if (c.tilt_new) servo_write(CH_TILT, (int)constrain(c.tilt, TILT_MIN, TILT_MAX));
+  if (c.dump_new) servo_write(CH_DUMP, constrain((int)c.dump, 15, 165));
+  if (c.conv_new) { current_conveyor_cmd = c.conv; conveyorStepper.setSpeed(current_conveyor_cmd); }
+  if (c.twist_new) handle_twist(c.lin_x, c.ang_z, c.hold_req);
+}
+
+// ---- subscription callbacks: run on the micro-ROS core, only store the command (no motor / servo / I2C access) ----
+void twist_callback(const void * msgin) {
+  const geometry_msgs__msg__Twist * msg = (const geometry_msgs__msg__Twist *)msgin;
+  portENTER_CRITICAL(&ipc_mux);
+  cmdbox.lin_x = msg->linear.x; cmdbox.ang_z = msg->angular.z; cmdbox.hold_req = msg->angular.x > 0.5f;
+  cmdbox.twist_new = true;
+  portEXIT_CRITICAL(&ipc_mux);
+}
+
 void pan_callback(const void * msgin) {
+  const std_msgs__msg__Float32 * msg = (const std_msgs__msg__Float32 *)msgin;
+  portENTER_CRITICAL(&ipc_mux); cmdbox.pan = msg->data; cmdbox.pan_new = true; portEXIT_CRITICAL(&ipc_mux);
+}
+
+void tilt_callback(const void * msgin) {
   const geometry_msgs__msg__Point * msg = (const geometry_msgs__msg__Point *)msgin;
-  tilt_servo.write((int)constrain(msg->y, TILT_MIN, TILT_MAX));
+  portENTER_CRITICAL(&ipc_mux); cmdbox.tilt = msg->y; cmdbox.tilt_new = true; portEXIT_CRITICAL(&ipc_mux);
 }
 
 void dump_callback(const void * msgin) {
   const std_msgs__msg__Float32 * msg = (const std_msgs__msg__Float32 *)msgin;
-  dump_servo.write(constrain((int)msg->data, 15, 165));
+  portENTER_CRITICAL(&ipc_mux); cmdbox.dump = msg->data; cmdbox.dump_new = true; portEXIT_CRITICAL(&ipc_mux);
 }
 
 void conveyor_callback(const void * msgin) {
   const std_msgs__msg__Float32 * msg = (const std_msgs__msg__Float32 *)msgin;
-  current_conveyor_cmd = msg->data;
-  conveyorStepper.setSpeed(current_conveyor_cmd);
+  portENTER_CRITICAL(&ipc_mux); cmdbox.conv = msg->data; cmdbox.conv_new = true; portEXIT_CRITICAL(&ipc_mux);
 }
-
-
 
 void hold_callback(const void * msgin) {
   const std_msgs__msg__Bool * msg = (const std_msgs__msg__Bool *)msgin;
-  hold_enabled = msg->data;
-  if (!hold_enabled) { hold_active = false; hold_corr = 0.0f; }
+  portENTER_CRITICAL(&ipc_mux); cmdbox.hold_en = msg->data; cmdbox.hold_new = true; portEXIT_CRITICAL(&ipc_mux);
 }
 
 // ---------- I2C helpers ----------
@@ -384,7 +545,7 @@ static bool tcs_read(uint16_t &r, uint16_t &g, uint16_t &b) {
 // BLOCKING: takes several seconds (motors, servos, stepper) with no spinning or publishing. Only trigger it while the robot is idle.
 enum { SC_NOT_RUN = 0, SC_PASS = 1, SC_FAIL = 2, SC_UNVERIFIED = 3 };
 enum { SC_MPU, SC_TCS, SC_MOT_FL, SC_MOT_RL, SC_MOT_FR, SC_MOT_RR,
-       SC_TILT, SC_DUMP, SC_STEPPER, SC_COUNT };
+       SC_TILT, SC_DUMP, SC_STEPPER, SC_PAN, SC_COUNT };   // SC_PAN appended last so the existing bit positions do not move
 #define SC_MIN_COUNTS  5
 #define SC_TEST_SPEED  0.3f
 
@@ -443,14 +604,19 @@ static uint8_t test_motor(int in1, int in2, ESP32Encoder &enc) {
 }
 
 static void exercise_actuators() {
-  tilt_servo.write((int)constrain(75, TILT_MIN, TILT_MAX));  delay(300);
-  tilt_servo.write((int)constrain(105, TILT_MIN, TILT_MAX)); delay(300);
-  tilt_servo.write(90);                                      delay(300);
-  sc_state[SC_TILT] = SC_UNVERIFIED;
+  servo_write(CH_TILT, (int)constrain(75, TILT_MIN, TILT_MAX));  delay(300);
+  servo_write(CH_TILT, (int)constrain(105, TILT_MIN, TILT_MAX)); delay(300);
+  servo_write(CH_TILT, 90);                                      delay(300);
+  sc_state[SC_TILT] = pca_ok ? SC_UNVERIFIED : SC_FAIL;   // a PCA9685 that stopped answering is a real fail, not "check by eye"
 
-  dump_servo.write(25); delay(500);
-  dump_servo.write(15); delay(500);
-  sc_state[SC_DUMP] = SC_UNVERIFIED;
+  servo_write(CH_DUMP, 25); delay(500);
+  servo_write(CH_DUMP, 15); delay(500);
+  sc_state[SC_DUMP] = pca_ok ? SC_UNVERIFIED : SC_FAIL;
+
+  pan_set_speed(0.5f);  delay(300);
+  pan_set_speed(-0.5f); delay(300);
+  pan_set_speed(0.0f);
+  sc_state[SC_PAN] = pca_ok ? SC_UNVERIFIED : SC_FAIL;
 
   conveyorStepper.enableOutputs();
   conveyorStepper.setSpeed(300);
@@ -477,9 +643,11 @@ static void selfcheck_run() {
   speed_ctrl_reset();   // self-check moved the wheels open loop (and rewrote encoder counts)
   last_filter_us = micros();
   sc_toggle = !sc_toggle;
-  selfcheck_publish();
+  sc_publish_req = true;      // the comms core publishes it (the control core never calls rcl_*)
 }
 
+// cmd_vel_raw uses best-effort QoS (a reliable queue would replay old commands after a Pi/network stall);
+// the CMD_TIMEOUT_MS watchdog in loop() stops the robot if commands stop arriving.
 // ---------- micro-ROS connection management ----------
 // Serial link budget: odometry+imu+encoders+color at 20/20/20/10 Hz need about 24 kB/s. 115200 baud carries only
 // 11.5 kB/s, so the link saturates and a ping times out -> the session is dropped and re-created ("random restarts").
@@ -510,15 +678,17 @@ static bool create_entities() {
   rmw_uros_sync_session(1000);
   time_synced = rmw_uros_epoch_synchronized();
 
-  RC_OK(rclc_subscription_init_default(&twist_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist), "cmd_vel_raw"));
-  RC_OK(rclc_subscription_init_default(&pan_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Point), "actuators/tilt_cmd"));
+  RC_OK(rclc_subscription_init_best_effort(&twist_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist), "cmd_vel_raw"));
+  RC_OK(rclc_subscription_init_default(&pan_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32), "actuators/pan_cmd"));
+  RC_OK(rclc_subscription_init_default(&tilt_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Point), "actuators/tilt_cmd"));
   RC_OK(rclc_subscription_init_default(&dump_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32), "actuators/dump_cmd"));
   RC_OK(rclc_subscription_init_default(&conv_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32), "actuators/conveyor_cmd"));
   
 
-  RC_OK(rclc_executor_init(&executor, &support.context, 6, &allocator));
+  RC_OK(rclc_executor_init(&executor, &support.context, 7, &allocator));   // twist, pan, tilt, dump, conveyor, self-check, hold
   RC_OK(rclc_executor_add_subscription(&executor, &twist_sub, &twist_msg, &twist_callback, ON_NEW_DATA));
   RC_OK(rclc_executor_add_subscription(&executor, &pan_sub, &pan_msg, &pan_callback, ON_NEW_DATA));
+  RC_OK(rclc_executor_add_subscription(&executor, &tilt_sub, &tilt_msg, &tilt_callback, ON_NEW_DATA));
   RC_OK(rclc_executor_add_subscription(&executor, &dump_sub, &dump_msg, &dump_callback, ON_NEW_DATA));
   RC_OK(rclc_executor_add_subscription(&executor, &conv_sub, &conv_msg, &conveyor_callback, ON_NEW_DATA));
   
@@ -545,6 +715,7 @@ static void destroy_entities() {
   (void)rcl_publisher_fini(&sc_pub, &node);
   (void)rcl_subscription_fini(&twist_sub, &node);
   (void)rcl_subscription_fini(&pan_sub, &node);
+  (void)rcl_subscription_fini(&tilt_sub, &node);
   (void)rcl_subscription_fini(&dump_sub, &node);
   (void)rcl_subscription_fini(&conv_sub, &node);
   (void)rcl_subscription_fini(&sc_sub, &node);
@@ -555,20 +726,147 @@ static void destroy_entities() {
 
   sc_enabled = false;
   hold_sub_ok = false;
-  hold_enabled = true;
+  portENTER_CRITICAL(&ipc_mux); cmdbox.hold_en = true; cmdbox.hold_new = true; portEXIT_CRITICAL(&ipc_mux);   // heading hold is on again after every reconnect
   time_synced = false;
+}
+
+// ---------- Comms core: snapshot -> ROS messages ----------
+static void publish_snapshot() {
+  Snapshot sn;
+  portENTER_CRITICAL(&ipc_mux);
+  sn = snap;
+  snap.enc_new = snap.imu_new = snap.odom_new = snap.color_new = false;
+  portEXIT_CRITICAL(&ipc_mux);
+
+  if (sn.color_new) {
+    color_msg.x = sn.cr; color_msg.y = sn.cg; color_msg.z = sn.cb;
+    RCSOFTCHECK(rcl_publish(&color_pub, &color_msg, NULL));
+  }
+  if (!(sn.enc_new || sn.imu_new || sn.odom_new) || !time_synced) return;   // stamped topics wait for the time sync
+
+  int64_t age_us = esp_timer_get_time() - sn.stamp_us;
+  if (age_us > 500000) return;                                   // stale (long stall): drop it instead of publishing old data
+  int64_t t_ns = rmw_uros_epoch_nanos() - age_us * 1000LL;       // stamp = time the sample was TAKEN, not when it is sent
+  int32_t sec = (int32_t)(t_ns / 1000000000LL);
+  uint32_t nsec = (uint32_t)(t_ns % 1000000000LL);
+
+  if (sn.enc_new) {
+    for (int i = 0; i < 4; i++) enc_msg.data.data[i] = sn.ticks[i];
+    enc_msg.data.data[4] = sec;
+    enc_msg.data.data[5] = (int32_t)nsec;
+    RCSOFTCHECK(rcl_publish(&enc_pub, &enc_msg, NULL));
+  }
+
+  if (sn.imu_new) {
+    imu_msg.header.stamp.sec = sec; imu_msg.header.stamp.nanosec = nsec;
+    imu_msg.linear_acceleration.x = sn.lax; imu_msg.linear_acceleration.y = sn.lay; imu_msg.linear_acceleration.z = sn.laz;
+    imu_msg.angular_velocity.x = sn.avx; imu_msg.angular_velocity.y = sn.avy; imu_msg.angular_velocity.z = sn.avz;
+    imu_msg.orientation.w = sn.qw; imu_msg.orientation.x = sn.qx; imu_msg.orientation.y = sn.qy; imu_msg.orientation.z = sn.qz;
+    RCSOFTCHECK(rcl_publish(&imu_pub, &imu_msg, NULL));          // only flagged while the IMU delivered fresh data
+  }
+
+  if (sn.odom_new) {
+    odom_msg.header.stamp.sec = sec; odom_msg.header.stamp.nanosec = nsec;
+    odom_msg.pose.pose.position.x = sn.ox;
+    odom_msg.pose.pose.position.y = sn.oy;
+    odom_msg.pose.pose.position.z = 0.0;
+    odom_msg.pose.pose.orientation.x = 0.0;                      // yaw-only orientation for the 2D odometry
+    odom_msg.pose.pose.orientation.y = 0.0;
+    odom_msg.pose.pose.orientation.z = sn.oqz;
+    odom_msg.pose.pose.orientation.w = sn.oqw;
+    odom_msg.twist.twist.linear.x = sn.ovx;                      // fused EKF velocity
+    odom_msg.twist.twist.linear.y = 0.0;
+    odom_msg.twist.twist.angular.z = sn.owz;
+
+    // Pose covariance (row-major 6x6: x=0, y=7, yaw=35). Unobserved axes get a large value.
+    for (int i = 0; i < 36; i++) { odom_msg.pose.covariance[i] = 0.0; odom_msg.twist.covariance[i] = 0.0; }
+    odom_msg.pose.covariance[0]  = sn.p00; odom_msg.pose.covariance[1]  = sn.p01;
+    odom_msg.pose.covariance[6]  = sn.p01; odom_msg.pose.covariance[7]  = sn.p11;
+    odom_msg.pose.covariance[35] = sn.p22;
+    odom_msg.pose.covariance[14] = odom_msg.pose.covariance[21] = odom_msg.pose.covariance[28] = 1e6;
+    odom_msg.twist.covariance[0]  = sn.p33;                      // variance of linear velocity
+    odom_msg.twist.covariance[35] = 0.05;                        // wz, PLACEHOLDER
+    odom_msg.twist.covariance[7]  = odom_msg.twist.covariance[14] = odom_msg.twist.covariance[21] = odom_msg.twist.covariance[28] = 1e6;
+    RCSOFTCHECK(rcl_publish(&odom_pub, &odom_msg, NULL));
+  }
+}
+
+// Everything that can block on the Pi / serial link lives here, on core 0.
+static void uros_task(void *arg) {
+  (void)arg;
+  uint32_t last_agent_check = 0, last_sync_ms = 0, last_sc_pub = 0;
+  uint8_t ping_fail = 0;
+  for (;;) {
+    uint32_t now = millis();
+    switch (agent_state) {
+      case WAITING_AGENT:
+        if (now - last_agent_check >= 500) {
+          last_agent_check = now;
+          agent_state = (rmw_uros_ping_agent(100, 1) == RMW_RET_OK) ? AGENT_AVAILABLE : WAITING_AGENT;
+        }
+        break;
+      case AGENT_AVAILABLE:
+        if (create_entities()) {
+          ping_fail = 0;
+          last_agent_check = millis();
+          agent_state = AGENT_CONNECTED;
+        } else {
+          destroy_entities();
+          agent_state = WAITING_AGENT;
+        }
+        break;
+      case AGENT_CONNECTED:
+        if (now - last_agent_check >= PING_PERIOD_MS) {
+          last_agent_check = now;
+          if (rmw_uros_ping_agent(PING_TIMEOUT_MS, 1) == RMW_RET_OK) {
+            ping_fail = 0;
+          } else if (++ping_fail >= PING_MAX_FAILS) {          // tolerate a few missed pings on a busy link
+            ping_fail = 0;
+            agent_state = AGENT_DISCONNECTED;
+          }
+        }
+        if (agent_state == AGENT_CONNECTED) {
+          RCSOFTCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(0)));
+        }
+        break;
+      case AGENT_DISCONNECTED:
+        destroy_entities();
+        agent_state = WAITING_AGENT;
+        break;
+    }
+
+    const bool connected = (agent_state == AGENT_CONNECTED);
+    now = millis();
+
+    // Time sync: retry until it succeeds, then re-sync periodically. Stamped topics wait for time_synced.
+    if (connected && !time_synced) {
+      if (now - last_sync_ms >= TIME_RETRY_MS) {
+        last_sync_ms = now;
+        rmw_uros_sync_session(200);
+        time_synced = rmw_uros_epoch_synchronized();
+      }
+    } else if (connected && now - last_sync_ms >= TIME_RESYNC_MS) {
+      last_sync_ms = now;
+      rmw_uros_sync_session(200);
+      time_synced = rmw_uros_epoch_synchronized();
+    }
+
+    if (connected) {
+      publish_snapshot();
+      if (sc_enabled && (sc_publish_req || now - last_sc_pub >= 1000)) {
+        sc_publish_req = false;
+        last_sc_pub = now;
+        selfcheck_publish();
+      }
+    }
+    vTaskDelay(1);   // 1 ms: feeds the core-0 idle watchdog and keeps the executor responsive
+  }
 }
 
 void setup() {
   Serial.begin(MICROROS_BAUD);
   set_microros_serial_transports(Serial);
   analogWriteFrequency(20000);
-
-  ESP32PWM::allocateTimer(0); ESP32PWM::allocateTimer(1); ESP32PWM::allocateTimer(2);
-  tilt_servo.setPeriodHertz(50); dump_servo.setPeriodHertz(50);
-  tilt_servo.attach(TILT_PIN, SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US);
-  dump_servo.attach(DUMP_PIN, SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US);
-  tilt_servo.write(90); dump_servo.write(15);
 
   pinMode(FL_IN1, OUTPUT); pinMode(FL_IN2, OUTPUT);
   pinMode(FR_IN1, OUTPUT); pinMode(FR_IN2, OUTPUT);
@@ -583,6 +881,8 @@ void setup() {
   enc_msg.data.capacity = 6; enc_msg.data.size = 6; enc_msg.data.data = enc_data;
 
   Wire.begin(I2C_SDA, I2C_SCL);
+  pca_ok = pca_init();                                        // before the multi-second IMU calibration below
+  pan_set_speed(0.0f); servo_write(CH_TILT, 90); servo_write(CH_DUMP, 15);   // pan stopped, tilt/dump at their start positions
   if (tcs.begin()) color_active = true;
 
   if (imuSensor.begin()) {
@@ -616,51 +916,12 @@ void setup() {
   odom_msg.child_frame_id.capacity = sizeof(base_link_frame);
 
   agent_state = WAITING_AGENT;
+  xTaskCreatePinnedToCore(uros_task, "uros", 20480, NULL, 2, NULL, 0);   // stack in bytes; raise it if create_entities() overflows
 }
 
 void loop() {
+  process_commands();                 // apply whatever the comms core received (never blocks)
   uint32_t current_time = millis();
-
-  static uint32_t last_agent_check = 0;
-  static uint8_t ping_fail = 0;
-  switch (agent_state) {
-    case WAITING_AGENT:
-      if (current_time - last_agent_check >= 500) {
-        last_agent_check = current_time;
-        agent_state = (rmw_uros_ping_agent(100, 1) == RMW_RET_OK) ? AGENT_AVAILABLE : WAITING_AGENT;
-      }
-      break;
-    case AGENT_AVAILABLE:
-      if (create_entities()) {
-        ping_fail = 0;
-        last_agent_check = millis();
-        agent_state = AGENT_CONNECTED;
-      } else {
-        destroy_entities();
-        agent_state = WAITING_AGENT;
-      }
-      break;
-    case AGENT_CONNECTED:
-      if (current_time - last_agent_check >= PING_PERIOD_MS) {
-        last_agent_check = current_time;
-        if (rmw_uros_ping_agent(PING_TIMEOUT_MS, 1) == RMW_RET_OK) {
-          ping_fail = 0;
-        } else if (++ping_fail >= PING_MAX_FAILS) {          // tolerate a few missed pings on a busy link
-          ping_fail = 0;
-          agent_state = AGENT_DISCONNECTED;
-        }
-      }
-      if (agent_state == AGENT_CONNECTED) {
-        RCSOFTCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(0)));
-      }
-      break;
-    case AGENT_DISCONNECTED:
-      destroy_entities();
-      agent_state = WAITING_AGENT;
-      break;
-  }
-  const bool connected = (agent_state == AGENT_CONNECTED);
-  current_time = millis();
 
   // 200 Hz IMU sampling; averaged in the 50 ms block below
   static uint32_t last_fast_us = 0;
@@ -686,43 +947,10 @@ void loop() {
     else            speed_ctrl_step(dt);
   }
 
-  // Time sync: retry until it succeeds, then re-sync periodically. Stamped topics wait for time_synced.
-  static uint32_t last_sync_ms = 0;
-  if (connected && !time_synced) {
-    if (current_time - last_sync_ms >= TIME_RETRY_MS) {
-      last_sync_ms = current_time;
-      rmw_uros_sync_session(200);
-      time_synced = rmw_uros_epoch_synchronized();
-    }
-  } else if (connected && current_time - last_sync_ms >= TIME_RESYNC_MS) {
-    last_sync_ms = current_time;
-    rmw_uros_sync_session(200);
-    time_synced = rmw_uros_epoch_synchronized();
-  }
-
-  static uint32_t last_sc_pub = 0;
-  if (connected && sc_enabled && current_time - last_sc_pub >= 1000) {
-    last_sc_pub = current_time;
-    selfcheck_publish();
-  }
-
   if (abs(current_conveyor_cmd) > 0.1) {
     conveyorStepper.enableOutputs(); conveyorStepper.runSpeed();
   } else {
     conveyorStepper.disableOutputs();
-  }
-
-  static uint32_t last_enc_pub = 0;
-  if (connected && time_synced && current_time - last_enc_pub >= 50) {
-    last_enc_pub = current_time;
-    enc_msg.data.data[0] = (int32_t)enc_fl.getCount();
-    enc_msg.data.data[1] = (int32_t)enc_rl.getCount();
-    enc_msg.data.data[2] = (int32_t)enc_fr.getCount();
-    enc_msg.data.data[3] = (int32_t)enc_rr.getCount();
-    int64_t enc_t_ns = rmw_uros_epoch_nanos();
-    enc_msg.data.data[4] = (int32_t)(enc_t_ns / 1000000000LL);
-    enc_msg.data.data[5] = (int32_t)(enc_t_ns % 1000000000LL);
-    RCSOFTCHECK(rcl_publish(&enc_pub, &enc_msg, NULL));
   }
 
   static uint32_t last_imu_pub = 0;
@@ -768,14 +996,14 @@ void loop() {
           else if (straight && fabsf(gz) < 0.05f)                              { k_b = 0.001f; clamp_b = true; }
         }
         if (k_b > 0.0f) {
-          float b = imuSensor.getGyroBiasZ() + k_b * gz;
+          float b = imuSensor.getGyroBiasZ() + k_b * gz / imuSensor.getGyroZScale();   // bias is in raw (unscaled) units
           if (clamp_b) b = constrain(b, gz_bias0 - 0.01f, gz_bias0 + 0.01f);  // +-0.01 rad/s around the boot calibration
           imuSensor.updateGyroBiasZ(b);
           gz -= k_b * gz;                                                     // apply instantly to this tick
         }
 
-        // Deadband only while no turn is commanded (small real turn rates must pass otherwise)
-        if (fabsf(cmd_ang) < 0.01f && fabsf(gz) < 0.005f) gz = 0.0f;
+        // Deadband only while fully stopped: while driving, small real yaw drift (veer) must reach the heading estimate
+        if (still && fabsf(gz) < 0.005f) gz = 0.0f;
 
         // --- EKF Update Process (4-State) ---
         int32_t enc_l = (S_FL * enc_fl.getCount() + S_RL * enc_rl.getCount()) / 2;
@@ -789,10 +1017,12 @@ void loop() {
         float d_center = (d_left + d_right) / 2.0f;
         float v_enc = d_center / dt;   // yaw from the encoders is deliberately not used (skid steer under-reads turns)
 
-        // Gravity-compensated forward accel in m/s^2 (gain-corrected, pitch-compensated)
         // No IMU: yaw rate from the encoders using the effective track (skid steer under-reads with the geometric one), no accelerometer.
         if (!imu_ok) gz = (d_right - d_left) / TRACK_CMD / dt;
+        // Gravity-compensated forward accel in m/s^2 (gain-corrected, absolute-pitch-compensated)
         float accel_forward = imu_ok ? att.forwardAccel() : 0.0f;
+        // Odometry is planar: project the along-slope speed onto the horizontal plane
+        float cph = imu_ok ? cosf(att.pitch) : 1.0f;
 
         // 1. Prediction Step
         float v_pred = X(3) + (accel_forward * dt);
@@ -803,15 +1033,15 @@ void loop() {
             v_pred = 0.0f;
         }
 
-        X(0) += v_pred * cosf(theta_pred) * dt;
-        X(1) += v_pred * sinf(theta_pred) * dt;
+        X(0) += v_pred * cph * cosf(theta_pred) * dt;
+        X(1) += v_pred * cph * sinf(theta_pred) * dt;
         X(2) = theta_pred;
         X(3) = v_pred;
 
         // 2. Jacobian Matrix F
         BLA::Matrix<4, 4> F = {
-            1.0f, 0.0f, -v_pred * sinf(theta_pred) * dt, cosf(theta_pred) * dt,
-            0.0f, 1.0f,  v_pred * cosf(theta_pred) * dt, sinf(theta_pred) * dt,
+            1.0f, 0.0f, -v_pred * cph * sinf(theta_pred) * dt, cph * cosf(theta_pred) * dt,
+            0.0f, 1.0f,  v_pred * cph * cosf(theta_pred) * dt, cph * sinf(theta_pred) * dt,
             0.0f, 0.0f,  1.0f,                           0.0f,
             0.0f, 0.0f,  0.0f,                           1.0f
         };
@@ -845,80 +1075,61 @@ void loop() {
           apply_drive();
         }
 
-        // --- Publish IMU ---
-        int64_t t_ns = rmw_uros_epoch_nanos();
-        imu_msg.header.stamp.sec = (int32_t)(t_ns / 1000000000LL);
-        imu_msg.header.stamp.nanosec = (uint32_t)(t_ns % 1000000000LL);
-
-        imu_msg.linear_acceleration.x = ax * att.gainK();
-        imu_msg.linear_acceleration.y = ay * att.gainK();
-        imu_msg.linear_acceleration.z = az * att.gainK();
-        imu_msg.angular_velocity.x = gx - att.gyroBias(0);
-        imu_msg.angular_velocity.y = gy - att.gyroBias(1);
-        imu_msg.angular_velocity.z = gz;
-
-        // Orientation: roll/pitch from attitude filter, yaw from EKF (ZYX Euler -> quaternion)
+        // --- Hand the result to the comms core (latest wins; nothing here can block on the link) ---
         float cr = cosf(att.roll * 0.5f),  sr = sinf(att.roll * 0.5f);
         float cp = cosf(att.pitch * 0.5f), sp = sinf(att.pitch * 0.5f);
         float cy = cosf(filtered_yaw * 0.5f), sy = sinf(filtered_yaw * 0.5f);
-        imu_msg.orientation.w = cr*cp*cy + sr*sp*sy;
-        imu_msg.orientation.x = sr*cp*cy - cr*sp*sy;
-        imu_msg.orientation.y = cr*sp*cy + sr*cp*sy;
-        imu_msg.orientation.z = cr*cp*sy - sr*sp*cy;
-
-        // --- Publish Odometry ---
-        odom_msg.header.stamp.sec = imu_msg.header.stamp.sec;
-        odom_msg.header.stamp.nanosec = imu_msg.header.stamp.nanosec;
-
-        odom_msg.pose.pose.position.x = X(0);
-        odom_msg.pose.pose.position.y = X(1);
-        odom_msg.pose.pose.position.z = 0.0;
-
-        // Yaw-only orientation for the 2D odometry
-        odom_msg.pose.pose.orientation.x = 0.0;
-        odom_msg.pose.pose.orientation.y = 0.0;
-        odom_msg.pose.pose.orientation.z = sy;
-        odom_msg.pose.pose.orientation.w = cy;
-
-        // Broadcast the fused EKF velocity instead of raw encoder velocity
-        odom_msg.twist.twist.linear.x = X(3);
-        odom_msg.twist.twist.linear.y = 0.0;
-        odom_msg.twist.twist.angular.z = gz;
-
-        // Pose covariance (row-major 6x6: x=0, y=7, yaw=35). Unobserved axes get a large value.
-        for (int i = 0; i < 36; i++) { odom_msg.pose.covariance[i] = 0.0; odom_msg.twist.covariance[i] = 0.0; }
-        odom_msg.pose.covariance[0]  = P(0, 0); odom_msg.pose.covariance[1]  = P(0, 1);
-        odom_msg.pose.covariance[6]  = P(1, 0); odom_msg.pose.covariance[7]  = P(1, 1);
-        odom_msg.pose.covariance[35] = P(2, 2);
-        odom_msg.pose.covariance[14] = odom_msg.pose.covariance[21] = odom_msg.pose.covariance[28] = 1e6;
-        odom_msg.twist.covariance[0]  = P(3, 3); // Variance of linear velocity
-        odom_msg.twist.covariance[35] = 0.05;    // wz, PLACEHOLDER
-        odom_msg.twist.covariance[7]  = odom_msg.twist.covariance[14] = odom_msg.twist.covariance[21] = odom_msg.twist.covariance[28] = 1e6;
-
+        int32_t t0 = (int32_t)enc_fl.getCount(), t1 = (int32_t)enc_rl.getCount();
+        int32_t t2 = (int32_t)enc_fr.getCount(), t3 = (int32_t)enc_rr.getCount();
         static uint8_t pub_cnt = 0;
-        if (connected && time_synced && (++pub_cnt >= IMU_ODOM_PUB_DIV)) {
-            pub_cnt = 0;
-            if (imu_ok) { RCSOFTCHECK(rcl_publish(&imu_pub, &imu_msg, NULL)); }   // never publish stale IMU data
-            RCSOFTCHECK(rcl_publish(&odom_pub, &odom_msg, NULL));
+        bool pub_now = (++pub_cnt >= IMU_ODOM_PUB_DIV);
+        if (pub_now) pub_cnt = 0;
+
+        portENTER_CRITICAL(&ipc_mux);
+        snap.stamp_us = esp_timer_get_time();
+        snap.ticks[0] = t0; snap.ticks[1] = t1; snap.ticks[2] = t2; snap.ticks[3] = t3;
+        snap.enc_new = true;
+        if (pub_now) {
+          snap.lax = ax * att.gainK(); snap.lay = ay * att.gainK(); snap.laz = az * att.gainK();
+          snap.avx = gx - att.gyroBias(0); snap.avy = gy - att.gyroBias(1); snap.avz = gz;
+          // ZYX Euler -> quaternion: roll/pitch from the attitude filter, yaw from the EKF
+          snap.qw = cr*cp*cy + sr*sp*sy;
+          snap.qx = sr*cp*cy - cr*sp*sy;
+          snap.qy = cr*sp*cy + sr*cp*sy;
+          snap.qz = cr*cp*sy - sr*sp*cy;
+          snap.ox = X(0); snap.oy = X(1); snap.oqz = sy; snap.oqw = cy;
+          snap.ovx = X(3); snap.owz = gz;
+          snap.p00 = P(0, 0); snap.p01 = P(0, 1); snap.p11 = P(1, 1); snap.p22 = P(2, 2); snap.p33 = P(3, 3);
+          snap.imu_new = imu_ok;                // never publish stale IMU data
+          snap.odom_new = true;
         }
+        portEXIT_CRITICAL(&ipc_mux);
+      } else {
+        // dt out of range (long block / reconnect): re-baseline the encoder deltas so the next tick does not
+        // see the whole accumulated count as one step (velocity spike -> position jump)
+        last_enc_l = (S_FL * enc_fl.getCount() + S_RL * enc_rl.getCount()) / 2;
+        last_enc_r = (S_FR * enc_fr.getCount() + S_RR * enc_rr.getCount()) / 2;
       }
     }
   }
 
   static uint32_t last_color_pub = 0;
   static bool color_primed = false;
-  if (connected && color_active && current_time - last_color_pub >= 100) {
+  if (color_active && current_time - last_color_pub >= 100) {
     last_color_pub = current_time;
     uint16_t r, g, b;
     if (tcs_read(r, g, b)) {
       if (!color_primed) {
         color_primed = true;
       } else {
-        color_msg.x = r; color_msg.y = g; color_msg.z = b;
-        RCSOFTCHECK(rcl_publish(&color_pub, &color_msg, NULL));
+        portENTER_CRITICAL(&ipc_mux);
+        snap.cr = r; snap.cg = g; snap.cb = b; snap.color_new = true;
+        portEXIT_CRITICAL(&ipc_mux);
       }
     }
   }
+
+  if (pan_active && current_time - pan_last_ms > CMD_TIMEOUT_MS) pan_set_speed(0.0f);   // pan watchdog: no command, no motion
 
   static bool is_stopped = false;
   if (current_time - last_cmd_ms > CMD_TIMEOUT_MS) {

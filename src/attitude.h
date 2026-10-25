@@ -37,7 +37,9 @@ public:
     else       { t_ = (ap < RAMP_OFF) ? t_ + dt : 0; if (t_ > 0.3f) { ramp = false; t_ = 0; } }
   }
 
-  float forwardAccel() const { return ax_ + G * sinf(pitch); }
+  // pitch is relative to the calibration pose; gravity along x depends on the absolute pitch (pitch + pitch0_),
+  // otherwise a mounting tilt leaves a constant bias of G*sin(pitch0_) at rest.
+  float forwardAccel() const { return ax_ + G * sinf(pitch + pitch0_); }
   float gainK() const { return k_; }
   float gyroBias(int i) const { return gb_[i]; }
 

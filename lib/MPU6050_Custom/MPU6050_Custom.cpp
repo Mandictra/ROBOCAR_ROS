@@ -52,15 +52,15 @@ bool MPU6050_Custom::readData(float &ax, float &ay, float &az, float &gx, float 
     int16_t v[7]; 
     if (!readRaw(v)) return false; 
 
-    // Scale to m/s^2 and subtract Stage 1 resting offsets 
+    // Scale to m/s^2 and subtract the static resting offsets
     ax = (v[0] / 16384.0f * G) - (-0.377f);
     ay = (v[1] / 16384.0f * G) - (0.211f);
     az = (v[2] / 16384.0f * G) - (10.444f - G);
 
-    // Scale to rad/s, apply Stage 1 static biases, and apply Stage 2 Z-axis scale factor (0.793)
+    // Scale to rad/s and subtract the static X/Y biases; Z subtracts the boot/learned bias, then applies GYRO_Z_SCALE
     gx = ((v[4] / 131.0f) * (PI / 180.0f)) - (-0.04539f);
     gy = ((v[5] / 131.0f) * (PI / 180.0f)) - (0.01483f);
-    gz = ((v[6] / 131.0f) * (PI / 180.0f)) - gyro_bias_z;
+    gz = (((v[6] / 131.0f) * (PI / 180.0f)) - gyro_bias_z) * GYRO_Z_SCALE;
 
     return true; 
 }
