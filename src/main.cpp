@@ -67,14 +67,14 @@ const float WHEEL_CIRC      = 2.0f * PI * WHEEL_RADIUS;            // 0.2394 m
 const float MAX_WHEEL_SPEED = MAX_WHEEL_RPM / 60.0f * WHEEL_CIRC;  // 0.479 m/s at 120 rpm
 // Effective track for turn commands. Skid steer turns as if the track were wider than the geometric 0.215 m (TRACK_WIDTH).
 // Tune: command 1.0 rad/s, read /imu_data angular_velocity.z, TRACK_CMD_new = TRACK_CMD * 1.0 / measured.
-const float TRACK_CMD = 0.30f;
+const float TRACK_CMD = 0.3719f;
 // Straight-line trim (1/m). Measured veer to the LEFT of 0.0032 rad/s at 0.23 m/s -> 0.0032/0.23 = 0.0139 1/m.
 // Added as a yaw-rate correction proportional to forward speed: w -= STRAIGHT_TRIM * cmd_lin (works forward and reverse).
 // Tune: drive 3 m straight at normal speed; still veers LEFT -> increase it, veers RIGHT -> decrease it, straight -> done. 0 = off.
 // (Only the no-IMU fallback yaw is slightly affected: its encoder yaw then reads this deliberate wheel difference.)
-const float STRAIGHT_TRIM = 0.0139f;
+const float STRAIGHT_TRIM = 0.068f;
 // Cap on the commanded turn rate. Keeps lidar scans clean for SLAM; keep dashboard WMAX and Nav2 max angular <= this.
-const float MAX_YAW_RATE = 2.0f;   // rad/s
+const float MAX_YAW_RATE = 2.4f;   // rad/s
 // Fraction of linear speed removed at full turn rate. 0 = pass cmd_vel through unchanged (right for Nav2, so its
 // predicted trajectories match what the robot does). The old behaviour was 0.5 (set it back if the dashboard needs it).
 #define TURN_SLOWDOWN 0.0f
@@ -125,6 +125,76 @@ static uint16_t imu_acc_n  = 0;
 float gz_bias0 = 0.0f;                              // boot-calibrated gyro z bias, centre of the clamp used while driving
 
 const int TCS_ADDR = 0x29;
+
+// ---------- I2C robustness: shorter hang timeout, bus clear, IMU wake/config restore ----------
+#ifndef I2C_CLOCK_HZ
+#define I2C_CLOCK_HZ 100000   // unchanged default; 400000 cuts IMU bus time from ~31% to ~8% but needs short wires / good pull-ups
+#endif
+#ifndef IMU_I2C_ADDR
+#define IMU_I2C_ADDR 0x68
+#endif
+#define I2C_TIMEOUT_MS 20      // ESP32 Wire default is 50 ms: a hung transfer would stall loop() for that long
+
+// MPU6050 config registers shadowed after begin(): SMPLRT_DIV, CONFIG, GYRO_CONFIG, ACCEL_CONFIG, PWR_MGMT_1.
+// Add any other register MPU6050_Custom::begin() writes (INT_ENABLE, USER_CTRL, ...) here.
+static const uint8_t IMU_CFG_REG[5] = {0x19, 0x1A, 0x1B, 0x1C, 0x6B};
+static uint8_t  imu_cfg[5]          = {0, 0, 0, 0, 0x01};
+static bool     imu_cfg_valid       = false;
+static uint32_t imu_hold_until_ms   = 0;   // no IMU reads until then (gyro start-up after wake)
+static uint32_t imu_recoveries      = 0;
+
+static bool imu_reg_read(uint8_t reg, uint8_t &v) {
+  Wire.beginTransmission(IMU_I2C_ADDR);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom((int)IMU_I2C_ADDR, 1) != 1) return false;
+  v = Wire.read();
+  return true;
+}
+static bool imu_reg_write(uint8_t reg, uint8_t v) {
+  Wire.beginTransmission(IMU_I2C_ADDR);
+  Wire.write(reg); Wire.write(v);
+  return Wire.endTransmission() == 0;
+}
+static void imu_cfg_capture() {
+  uint8_t tmp[5];
+  for (int i = 0; i < 5; i++) if (!imu_reg_read(IMU_CFG_REG[i], tmp[i])) return;
+  for (int i = 0; i < 5; i++) imu_cfg[i] = tmp[i];
+  imu_cfg[4] &= (uint8_t)~0xC0;   // never restore DEVICE_RESET (bit 7) or SLEEP (bit 6)
+  imu_cfg_valid = true;
+}
+
+// Release a slave holding SDA low (9 SCL pulses + STOP), then restart the peripheral.
+static void i2c_bus_clear() {
+  Wire.end();
+  pinMode(I2C_SDA, INPUT_PULLUP);
+  pinMode(I2C_SCL, OUTPUT_OPEN_DRAIN);
+  digitalWrite(I2C_SCL, HIGH);
+  for (int i = 0; i < 9; i++) {
+    digitalWrite(I2C_SCL, LOW);  delayMicroseconds(5);
+    digitalWrite(I2C_SCL, HIGH); delayMicroseconds(5);
+  }
+  pinMode(I2C_SDA, OUTPUT_OPEN_DRAIN);   // STOP: SDA low -> high while SCL high
+  digitalWrite(I2C_SDA, LOW);  delayMicroseconds(5);
+  digitalWrite(I2C_SDA, HIGH); delayMicroseconds(5);
+  Wire.begin(I2C_SDA, I2C_SCL);
+  Wire.setClock(I2C_CLOCK_HZ);
+  Wire.setTimeOut(I2C_TIMEOUT_MS);
+}
+
+// No sample for ~200 ms: clear the bus, wake the MPU6050 and restore its config. Does NOT call begin()/calibrateGyro(),
+// so gyro bias, scale, the attitude filter and the EKF state are untouched.
+static void imu_recover() {
+  i2c_bus_clear();
+  if (imu_cfg_valid) {
+    Wire.write(0x6B); Wire.write(0x01);                       // wake first: PWR_MGMT_1
+    for (int i = 0; i < 4; i++) imu_reg_write(IMU_CFG_REG[i], imu_cfg[i]);
+  } else {
+    imu_reg_write(0x6B, 0x01);                             // fallback: wake, gyro-X PLL clock
+  }
+  imu_hold_until_ms = millis() + 60;                       // gyro start-up (~35 ms) before the next read
+  imu_recoveries++;
+}
 
 // ---------- Servos on a PCA9685 (I2C 0x40, shares the bus with the IMU and colour sensor) ----------
 // All PCA9685 access happens on core 1 (process_commands / selfcheck / setup). The micro-ROS core never touches Wire.
@@ -881,12 +951,23 @@ void setup() {
   enc_msg.data.capacity = 6; enc_msg.data.size = 6; enc_msg.data.data = enc_data;
 
   Wire.begin(I2C_SDA, I2C_SCL);
+  Wire.setClock(I2C_CLOCK_HZ);
+  Wire.setTimeOut(I2C_TIMEOUT_MS);
   pca_ok = pca_init();                                        // before the multi-second IMU calibration below
   pan_set_speed(0.0f); servo_write(CH_TILT, 90); servo_write(CH_DUMP, 15);   // pan stopped, tilt/dump at their start positions
   if (tcs.begin()) color_active = true;
 
-  if (imuSensor.begin()) {
+    bool imu_ready = false;
+  for (int attempt = 0; attempt < 5 && !imu_ready; attempt++) {
+    if (attempt) { i2c_bus_clear(); delay(100); }
+    if (!imuSensor.begin()) continue;
+    delay(100);                                   // gyro start-up after wake
+    float v[6];
+    imu_ready = imuSensor.readData(v[0], v[1], v[2], v[3], v[4], v[5]);   // false while the chip returns zeros
+  }
+  if (imu_ready) {
     imu_active = true;
+    imu_cfg_capture();           // shadow the config registers for imu_recover()
     imuSensor.calibrateGyro();   // robot must be still (~1.2 s)
     gz_bias0 = imuSensor.getGyroBiasZ();
     attitudeCalibrate();         // robot must be still and level (~2 s)
@@ -925,7 +1006,7 @@ void loop() {
 
   // 200 Hz IMU sampling; averaged in the 50 ms block below
   static uint32_t last_fast_us = 0;
-  if (imu_active && (micros() - last_fast_us) >= 5000) {
+  if (imu_active && (int32_t)(millis() - imu_hold_until_ms) >= 0 && (micros() - last_fast_us) >= 5000) {
     last_fast_us = micros();
     float v[6];
     if (imuSensor.readData(v[0], v[1], v[2], v[3], v[4], v[5])) {
@@ -959,6 +1040,28 @@ void loop() {
 
     float ax = 0, ay = 0, az = 0, gx = 0, gy = 0, gz = 0;
     imu_ok = imu_active && imu_acc_n > 0;
+    {
+      static uint8_t imu_bad_ticks = 0;
+      if (imu_active && imu_acc_n == 0 && (int32_t)(millis() - imu_hold_until_ms) >= 0) {
+        if (++imu_bad_ticks >= 4) { imu_bad_ticks = 0; imu_recover(); }   // 4 x 50 ms with no sample
+      } else if (imu_acc_n > 0) imu_bad_ticks = 0;
+    }
+        {
+      // 1 Hz health readback: catches a chip that reset/slept but still ACKs (the I2C result alone can't tell)
+      static uint8_t cfg_tick = 0;
+      if (++cfg_tick >= 20) {                                   // 20 x 50 ms
+        cfg_tick = 0;
+        if (imu_active && imu_cfg_valid && (int32_t)(millis() - imu_hold_until_ms) >= 0) {
+          uint8_t pwr = 0, dlpf = 0;
+          bool ok = imu_reg_read(0x6B, pwr) && imu_reg_read(0x1A, dlpf);
+          if (!ok || (pwr & 0xC0) || dlpf != imu_cfg[1]) imu_recover();   // dead bus, asleep/reset, or config lost
+        }
+        if (pca_ok) {
+          uint8_t m = 0;
+          if (!pca_read8(PCA_REG_MODE1, m) || (m & 0x10) || !(m & 0x20)) pca_ok = false;   // next servo command re-inits it
+        }
+      }
+    }
     if (imu_ok) {
       float inv = 1.0f / imu_acc_n;
       ax = imu_acc[0] * inv; ay = imu_acc[1] * inv; az = imu_acc[2] * inv;

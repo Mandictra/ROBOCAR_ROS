@@ -20,6 +20,7 @@ public:
     float getGyroBiasZ() const { return gyro_bias_z; }
     float getGyroZScale() const { return GYRO_Z_SCALE; }
     void updateGyroBiasZ(float new_bias) { gyro_bias_z = new_bias; }
+    volatile uint8_t lastFail = 0;   // 0 ok, 1 NACK, 2 short read, 3 rejected by 0.5 g gate
 
 private:
     uint8_t _addr;
@@ -27,7 +28,7 @@ private:
     const float G = 9.80665f;
     // Gyro Z scale (true rate = scale * measured). 1.0 = uncalibrated.
     // Calibrate: rotate the robot exactly 360 deg by hand with scale = 1, then scale = 2*pi / integral(gz dt).
-    static constexpr float GYRO_Z_SCALE = 1.0f;
+    static constexpr float GYRO_Z_SCALE = 1.0113f;
     
     bool readRaw(int16_t v[7]);
 };
